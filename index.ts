@@ -95,7 +95,13 @@ function summarizeGlossarySources(files: string[]): string {
 export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 	let entries: CompiledEntry[] = [];
 	let loadError: string | undefined;
-	let matchedTermsForUi: string[] = [];
+	let loadedTermsForSession = new Set<string>();
+
+	const appendLoadedTerms = (terms: string[]) => {
+		for (const term of terms) {
+			loadedTermsForSession.add(term);
+		}
+	};
 
 	const loadGlossaryFile = (jsonFile: string, cwd: string) => {
 		if (!fs.existsSync(jsonFile)) {
@@ -176,20 +182,19 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 		if (!ctx.hasUI) {
 			return;
 		}
-		if (matchedTermsForUi.length === 0) {
+		const loadedTerms = [...loadedTermsForSession];
+		if (loadedTerms.length === 0) {
 			ctx.ui.setWidget("lazy-glossary", undefined);
 			ctx.ui.setStatus("lazy-glossary", undefined);
 			return;
 		}
-		ctx.ui.setWidget("lazy-glossary", [
-			"Lazy glossary",
-			...matchedTermsForUi.map((term) => `- ${term}`),
-		]);
-		ctx.ui.setStatus("lazy-glossary", `Glossary: ${matchedTermsForUi.join(", ")}`);
+		const label = `Glossary: ${loadedTerms.join(", ")}`;
+		ctx.ui.setWidget("lazy-glossary", [label]);
+		ctx.ui.setStatus("lazy-glossary", label);
 	};
 
 	pi.registerCommand("glossary", {
-		description: "Show or reload the lazy glossary configuration",
+		description: "Show or reload the glossary configuration",
 		handler: async (args, ctx) => {
 			const trimmed = args.trim();
 			if (trimmed && trimmed !== "reload") {
@@ -197,9 +202,9 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 				return;
 			}
 			if (trimmed === "reload") {
-				const result = loadGlossary(ctx.cwd);
-				matchedTermsForUi = [];
+				loadedTermsForSession = new Set<string>();
 				updateGlossaryWidget(ctx);
+				const result = loadGlossary(ctx.cwd);
 				if (result.error) {
 					ctx.ui.notify(`Glossary reload failed: ${result.error}`, "error");
 					return;
@@ -228,7 +233,7 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		matchedTermsForUi = [];
+		loadedTermsForSession = new Set<string>();
 		updateGlossaryWidget(ctx);
 		const result = loadGlossary(ctx.cwd);
 		if (result.error) {
@@ -237,16 +242,13 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 		}
 		if (result.found && result.count > 0) {
 			ctx.ui.notify(
-				`Lazy glossary loaded: ${result.count} entr${result.count === 1 ? "y" : "ies"}${summarizeGlossarySources(result.files)}`,
+				`Glossary loaded: ${result.count} entr${result.count === 1 ? "y" : "ies"}${summarizeGlossarySources(result.files)}`,
 				"info",
 			);
 		}
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
-		matchedTermsForUi = [];
-		updateGlossaryWidget(ctx);
-
 		if (entries.length === 0) {
 			return;
 		}
@@ -257,23 +259,20 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 		}
 
 		const matched = entries.filter((entry) => entry.matcher.test(prompt));
+		const newlyMatched = matched.filter((entry) => !loadedTermsForSession.has(entry.term));
 
-		if (matched.length === 0) {
+		if (newlyMatched.length === 0) {
 			return;
 		}
 
-		matchedTermsForUi = matched.map((entry) => entry.term);
+		appendLoadedTerms(newlyMatched.map((entry) => entry.term));
 		updateGlossaryWidget(ctx);
 
-		const injectedGlossary = matched.map(formatEntry).join("\n\n");
+		const injectedGlossary = newlyMatched.map(formatEntry).join("\n\n");
 
 		return {
 			systemPrompt: `${event.systemPrompt}\n\n## Lazy-Loaded Agent Glossary\nThe user's prompt referenced explicit project glossary handles. Treat the following definitions as authoritative for this turn. Reuse them exactly as project-local language, and do not ask the user to restate them unless the definitions conflict or are ambiguous.\n\n${injectedGlossary}`,
 		};
 	});
 
-	pi.on("agent_end", async (_event, ctx) => {
-		matchedTermsForUi = [];
-		updateGlossaryWidget(ctx);
-	});
 }

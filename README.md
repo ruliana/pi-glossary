@@ -11,8 +11,8 @@ This lets you keep a shared project vocabulary in one place without bloating eve
 1. On session start, the extension loads `~/.pi/agent/glossary.json` and `.pi/glossary.json` from the current project.
 2. Project entries override global entries when they use the same `term`.
 3. Before an agent starts, it scans the user's prompt for matching glossary terms, aliases, or explicit regex patterns.
-4. If terms match, their definitions are injected into the system prompt for that turn.
-5. The matched glossary handles are also shown in the UI widget and footer status for that run.
+4. If terms match, only terms not already loaded in the current session are injected into the system prompt.
+5. Loaded glossary handles stay visible for the rest of the session in the UI widget and footer status as `Glossary: term, term`.
 
 ## What It Does
 
@@ -21,7 +21,8 @@ This lets you keep a shared project vocabulary in one place without bloating eve
 - Supports custom regex triggers per entry
 - Validates glossary entries and shows actionable errors
 - Reloads glossary configuration without restarting pi
-- Shows matched glossary handles in the UI when a term is injected
+- Shows loaded glossary handles in the UI for the whole session
+- Avoids re-injecting glossary entries that were already loaded earlier in the session
 
 ## Installation
 
@@ -109,6 +110,7 @@ Any other form, such as `/glossary something`, shows a usage hint instead of doi
 
 - The extension is user-scoped, and glossary data can be global (`~/.pi/agent/glossary.json`) or project-scoped (`.pi/glossary.json`).
 - Nothing is injected when the prompt does not mention a glossary handle.
+- Once a term is loaded in a session, mentioning it again does not inject it again.
 - If you edit the extension itself, run `/reload`.
 - If you edit either glossary file, run `/glossary reload`.
 
