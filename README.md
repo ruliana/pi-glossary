@@ -1,19 +1,52 @@
 # pi-glossary
 
-User-scoped pi extension that lazy-loads glossary definitions into the system prompt when a user mentions matching terms.
+A [pi](https://github.com/nichochar/pi-coding-agent) extension that lazy-loads glossary definitions into the system prompt when the user's prompt mentions matching terms.
 
 ## Why
 
-This implements the idea from the blog draft: keep a large shared vocabulary available, but only inject the definitions that are actually referenced in the current prompt.
+This lets you keep a shared project vocabulary in one place without bloating every turn's prompt. Definitions are only injected when the current prompt references a matching glossary handle.
 
-## Files
+## How It Works
 
-- `~/.pi/agent/extensions/pi-glossary/index.ts` — user-scoped extension entrypoint
-- `.pi/glossary.json` — project-scoped glossary configuration for the current repo
+1. On session start, the extension loads `.pi/glossary.json` from the current project.
+2. Before an agent starts, it scans the user's prompt for matching glossary terms, aliases, or explicit regex patterns.
+3. If terms match, their definitions are injected into the system prompt for that turn.
+4. The matched glossary handles are also shown in the UI widget and footer status for that run.
 
-## Glossary format
+## What It Does
 
-### JSON format
+- Loads glossary entries from a project-scoped `.pi/glossary.json`
+- Matches canonical terms and optional aliases out of the box
+- Supports custom regex triggers per entry
+- Validates glossary entries and shows actionable errors
+- Reloads glossary configuration without restarting pi
+- Shows matched glossary handles in the UI when a term is injected
+
+## Installation
+
+Clone directly into your pi extensions directory:
+
+```bash
+git clone https://github.com/ruliana/pi-glossary.git ~/.pi/agent/extensions/pi-glossary
+```
+
+Or, if you already have the repo elsewhere, symlink it:
+
+```bash
+ln -s /path/to/pi-glossary ~/.pi/agent/extensions/pi-glossary
+```
+
+Pi auto-discovers extensions from `~/.pi/agent/extensions/*/index.ts`.
+
+After installing or updating the extension, run:
+
+```text
+/reload
+```
+
+## Project Configuration
+
+Create `.pi/glossary.json` in the project where you want the glossary to apply:
 
 ```json
 {
@@ -32,48 +65,56 @@ This implements the idea from the blog draft: keep a large shared vocabulary ava
 }
 ```
 
-### Supported fields
+## Glossary Entry Fields
 
-- `term` — canonical glossary handle
-- `definition` — injected when the handle matches the prompt
-- `aliases` — optional plain-text aliases
-- `pattern` — optional explicit regex trigger; overrides the default matcher
-- `flags` — optional regex flags, default `iu`
-- `enabled` — optional boolean, set to `false` to disable an entry
-- `source` — optional descriptive provenance string included in the injected context
+| Field | Required | Description |
+|-------|----------|-------------|
+| `term` | Yes | Canonical glossary handle |
+| `definition` | Yes | Definition injected when the entry matches |
+| `aliases` | No | Additional plain-text aliases |
+| `pattern` | No | Explicit regex trigger; overrides the default matcher |
+| `flags` | No | Regex flags, defaults to `iu` |
+| `enabled` | No | Set to `false` to disable an entry |
+| `source` | No | Descriptive provenance string included in injected context |
 
-### Validation
+## Validation
 
 Each enabled entry must have:
+
 - a non-empty `term`
 - a non-empty `definition`
 - a valid regex `pattern` if `pattern` is provided
 
-If validation fails, `/glossary` and `/glossary reload` will show an actionable error that identifies the bad entry.
+If validation fails, `/glossary` and `/glossary reload` show an actionable error that identifies the bad entry.
 
-## Matching behavior
+## Matching Behavior
 
-If `pattern` is omitted, the extension builds a case-insensitive boundary-aware matcher from `term` plus `aliases`.
+If `pattern` is omitted, the extension builds a case-insensitive, boundary-aware matcher from `term` plus `aliases`.
 
 That means these work well out of the box:
+
 - single terms like `tophat`
 - dashed handles like `explore-plan-execute-review`
 - multi-word phrases like `railway topic`
 
-Use `pattern` when you want total control.
+Use `pattern` when you want total control over matching.
 
 ## Commands
 
-- `/glossary` — show whether the glossary is loaded
-- `/glossary reload` — reload `.pi/glossary.json` without restarting pi
+| Command | Description |
+|---------|-------------|
+| `/glossary` | Show whether the glossary is loaded |
+| `/glossary reload` | Reload `.pi/glossary.json` without restarting pi |
 
 Any other form, such as `/glossary something`, shows a usage hint instead of doing a partial lookup.
 
 ## Notes
 
-- This extension is installed globally for your user, but reads glossary entries from the current project's `.pi/glossary.json`.
-- This extension injects matching definitions into the per-turn system prompt.
-- When terms match, the extension also shows the matched glossary handles in the UI as a widget and footer status for that run.
-- Nothing is loaded when a prompt does not mention a glossary handle.
+- The extension is user-scoped, but the glossary data is project-scoped.
+- Nothing is injected when the prompt does not mention a glossary handle.
 - If you edit the extension itself, run `/reload`.
 - If you edit `.pi/glossary.json`, run `/glossary reload`.
+
+## License
+
+MIT
