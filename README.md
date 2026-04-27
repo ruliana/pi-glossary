@@ -8,10 +8,11 @@ This lets you keep a shared project vocabulary in one place without bloating eve
 
 ## How It Works
 
-1. On session start, the extension loads `.pi/glossary.json` from the current project.
-2. Before an agent starts, it scans the user's prompt for matching glossary terms, aliases, or explicit regex patterns.
-3. If terms match, their definitions are injected into the system prompt for that turn.
-4. The matched glossary handles are also shown in the UI widget and footer status for that run.
+1. On session start, the extension loads `~/.pi/agent/glossary.json` and `.pi/glossary.json` from the current project.
+2. Project entries override global entries when they use the same `term`.
+3. Before an agent starts, it scans the user's prompt for matching glossary terms, aliases, or explicit regex patterns.
+4. If terms match, their definitions are injected into the system prompt for that turn.
+5. The matched glossary handles are also shown in the UI widget and footer status for that run.
 
 ## What It Does
 
@@ -42,24 +43,24 @@ After installing or updating the extension, run:
 
 ## Project Configuration
 
-Create `.pi/glossary.json` in the project where you want the glossary to apply:
+Create `~/.pi/agent/glossary.json` for global terms and/or `.pi/glossary.json` inside a project for project-specific terms:
 
 ```json
-{
-  "entries": [
-    {
-      "term": "explore-plan-execute-review",
-      "aliases": ["EPER"],
-      "definition": "Spawn a team of subagents to explore, plan, execute, and review a task end to end."
-    },
-    {
-      "term": "finance-safe",
-      "pattern": "(?:^|[^\\w])finance-safe(?:$|[^\\w])",
-      "definition": "Use the conservative workflow: explicit assumptions, no destructive actions, and a reviewer pass before execution."
-    }
-  ]
-}
+[
+  {
+    "term": "explore-plan-execute-review",
+    "aliases": ["EPER"],
+    "definition": "Spawn a team of subagents to explore, plan, execute, and review a task end to end."
+  },
+  {
+    "term": "finance-safe",
+    "pattern": "(?:^|[^\\w])finance-safe(?:$|[^\\w])",
+    "definition": "Use the conservative workflow: explicit assumptions, no destructive actions, and a reviewer pass before execution."
+  }
+]
 ```
+
+When the same `term` exists in both files, the project entry wins.
 
 ## Glossary Entry Fields
 
@@ -100,16 +101,16 @@ Use `pattern` when you want total control over matching.
 | Command | Description |
 |---------|-------------|
 | `/glossary` | Show whether the glossary is loaded |
-| `/glossary reload` | Reload `.pi/glossary.json` without restarting pi |
+| `/glossary reload` | Reload `~/.pi/agent/glossary.json` and `.pi/glossary.json` without restarting pi |
 
 Any other form, such as `/glossary something`, shows a usage hint instead of doing a partial lookup.
 
 ## Notes
 
-- The extension is user-scoped, but the glossary data is project-scoped.
+- The extension is user-scoped, and glossary data can be global (`~/.pi/agent/glossary.json`) or project-scoped (`.pi/glossary.json`).
 - Nothing is injected when the prompt does not mention a glossary handle.
 - If you edit the extension itself, run `/reload`.
-- If you edit `.pi/glossary.json`, run `/glossary reload`.
+- If you edit either glossary file, run `/glossary reload`.
 
 ## License
 

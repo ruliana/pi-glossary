@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 
@@ -10,10 +11,6 @@ type GlossaryEntry = {
 	flags?: string;
 	enabled?: boolean;
 	source?: string;
-};
-
-type GlossaryFile = {
-	entries?: GlossaryEntry[];
 };
 
 type CompiledEntry = GlossaryEntry & {
@@ -85,46 +82,93 @@ function validateGlossaryEntry(entry: GlossaryEntry, index: number): GlossaryEnt
 	};
 }
 
+function summarizeGlossarySources(files: string[]): string {
+	if (files.length === 0) {
+		return "";
+	}
+	if (files.length === 1) {
+		return ` from ${files[0]}`;
+	}
+	return ` from ${files.join(" and ")}`;
+}
+
 export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 	let entries: CompiledEntry[] = [];
 	let loadError: string | undefined;
 	let matchedTermsForUi: string[] = [];
 
+	const loadGlossaryFile = (jsonFile: string, cwd: string) => {
+		if (!fs.existsSync(jsonFile)) {
+			return { found: false, entries: [] as GlossaryEntry[], path: jsonFile };
+		}
+
+		const raw = fs.readFileSync(jsonFile, "utf8");
+		const parsed = JSON.parse(raw) as unknown;
+		if (!Array.isArray(parsed)) {
+			throw new Error(`Invalid glossary file ${jsonFile}: root value must be an array`);
+		}
+
+		const sourceLabel = jsonFile.startsWith(os.homedir())
+			? jsonFile.replace(os.homedir(), "~")
+			: path.relative(cwd, jsonFile);
+
+		const validatedEntries = parsed
+			.filter((entry) => entry && typeof entry === "object" && (entry as GlossaryEntry).enabled !== false)
+			.map((entry, index) => {
+				const validatedEntry = validateGlossaryEntry(entry as GlossaryEntry, index);
+				return {
+					...validatedEntry,
+					source: validatedEntry.source ?? sourceLabel,
+				};
+			});
+
+		return { found: true, entries: validatedEntries, path: jsonFile, label: sourceLabel };
+	};
+
 	const loadGlossary = (cwd: string) => {
 		entries = [];
 		loadError = undefined;
 
-		const jsonFile = path.join(cwd, ".pi", "glossary.json");
-		if (!fs.existsSync(jsonFile)) {
-			return { found: false, count: 0, path: jsonFile };
-		}
+		const globalFile = path.join(os.homedir(), ".pi", "agent", "glossary.json");
+		const projectFile = path.join(cwd, ".pi", "glossary.json");
 
 		try {
-			const raw = fs.readFileSync(jsonFile, "utf8");
-			const parsed = JSON.parse(raw) as GlossaryFile;
-			const sourceEntries = Array.isArray(parsed.entries) ? parsed.entries : [];
+			const globalResult = loadGlossaryFile(globalFile, cwd);
+			const projectResult = loadGlossaryFile(projectFile, cwd);
+			const mergedEntries = new Map<string, GlossaryEntry>();
 
-			entries = sourceEntries
-				.filter((entry) => entry && entry.enabled !== false)
-				.map((entry, index) => {
-					const validatedEntry = validateGlossaryEntry(entry, index);
-					try {
-						return {
-							...validatedEntry,
-							source: validatedEntry.source ?? path.relative(cwd, jsonFile),
-							matcher: buildMatcher(validatedEntry),
-						};
-					} catch (error) {
-						throw new Error(
-							`Invalid glossary ${describeGlossaryEntry(validatedEntry, index)}: ${error instanceof Error ? error.message : String(error)}`,
-						);
-					}
-				});
+			for (const entry of globalResult.entries) {
+				mergedEntries.set(entry.term, entry);
+			}
+			for (const entry of projectResult.entries) {
+				mergedEntries.set(entry.term, entry);
+			}
 
-			return { found: true, count: entries.length, path: jsonFile };
+			entries = Array.from(mergedEntries.values()).map((entry, index) => {
+				try {
+					return {
+						...entry,
+						matcher: buildMatcher(entry),
+					};
+				} catch (error) {
+					throw new Error(
+						`Invalid glossary ${describeGlossaryEntry(entry, index)}: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+			});
+
+			const foundFiles = [globalResult, projectResult]
+				.filter((result) => result.found)
+				.map((result) => result.label ?? result.path);
+
+			return {
+				found: foundFiles.length > 0,
+				count: entries.length,
+				files: foundFiles,
+			};
 		} catch (error) {
 			loadError = error instanceof Error ? error.message : String(error);
-			return { found: true, count: 0, path: jsonFile, error: loadError };
+			return { found: false, count: 0, files: [] as string[], error: loadError };
 		}
 	};
 
@@ -162,8 +206,8 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 				}
 				ctx.ui.notify(
 					result.found
-						? `Glossary reloaded: ${result.count} entr${result.count === 1 ? "y" : "ies"}`
-						: "No .pi/glossary.json file found",
+						? `Glossary reloaded: ${result.count} entr${result.count === 1 ? "y" : "ies"}${summarizeGlossarySources(result.files)}`
+						: "No glossary files found",
 					"info",
 				);
 				return;
@@ -175,7 +219,7 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 			}
 
 			if (entries.length === 0) {
-				ctx.ui.notify("No glossary entries loaded from .pi/glossary.json", "info");
+				ctx.ui.notify("No glossary entries loaded", "info");
 				return;
 			}
 
@@ -192,7 +236,10 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 			return;
 		}
 		if (result.found && result.count > 0) {
-			ctx.ui.notify(`Lazy glossary loaded: ${result.count} entr${result.count === 1 ? "y" : "ies"}`, "info");
+			ctx.ui.notify(
+				`Lazy glossary loaded: ${result.count} entr${result.count === 1 ? "y" : "ies"}${summarizeGlossarySources(result.files)}`,
+				"info",
+			);
 		}
 	});
 
