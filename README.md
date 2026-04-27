@@ -24,19 +24,15 @@ This lets you keep a shared project vocabulary in one place without bloating eve
 
 ## Installation
 
-Clone directly into your pi extensions directory:
-
 ```bash
-git clone https://github.com/ruliana/pi-glossary.git ~/.pi/agent/extensions/pi-glossary
+pi install git:github.com/ruliana/pi-glossary
 ```
 
-Or, if you already have the repo elsewhere, symlink it:
+To remove:
 
 ```bash
-ln -s /path/to/pi-glossary ~/.pi/agent/extensions/pi-glossary
+pi remove git:github.com/ruliana/pi-glossary
 ```
-
-Pi auto-discovers extensions from `~/.pi/agent/extensions/*/index.ts`.
 
 After installing or updating the extension, run:
 

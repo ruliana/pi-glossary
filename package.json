@@ -1,0 +1,35 @@
+{
+  "name": "pi-glossary",
+  "version": "0.1.0",
+  "description": "Pi extension that lazy-loads glossary definitions into the system prompt when prompts mention matching terms",
+  "author": "Ronie",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ruliana/pi-glossary.git"
+  },
+  "homepage": "https://github.com/ruliana/pi-glossary#readme",
+  "bugs": {
+    "url": "https://github.com/ruliana/pi-glossary/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "glossary",
+    "extension"
+  ],
+  "files": [
+    "index.ts",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  }
+}
