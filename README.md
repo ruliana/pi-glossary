@@ -14,7 +14,7 @@ More about it in [this blog post](https://ronie.medium.com/agent-glossary-teachi
 2. Project entries override global entries when they use the same `term`.
 3. Before an agent starts, it scans the user's prompt for matching glossary terms, aliases, or explicit regex patterns.
 4. If terms match, only terms not already loaded in the current session are injected into the system prompt.
-5. Loaded glossary handles stay visible for the rest of the session in the UI widget and footer status as `Glossary: term, term`.
+5. Loaded glossary handles stay visible for the rest of the session in the footer status as `Glossary: term, term`.
 
 ## What It Does
 
@@ -23,7 +23,7 @@ More about it in [this blog post](https://ronie.medium.com/agent-glossary-teachi
 - Supports custom regex triggers per entry
 - Validates glossary entries and shows actionable errors
 - Reloads glossary configuration without restarting pi
-- Shows loaded glossary handles in the UI for the whole session
+- Shows loaded glossary handles in the footer status for the whole session
 - Avoids re-injecting glossary entries that were already loaded earlier in the session
 
 ## Installation

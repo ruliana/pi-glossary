@@ -189,7 +189,7 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 			return;
 		}
 		const label = `Glossary: ${loadedTerms.join(", ")}`;
-		ctx.ui.setWidget("lazy-glossary", [label]);
+		ctx.ui.setWidget("lazy-glossary", undefined);
 		ctx.ui.setStatus("lazy-glossary", label);
 	};
 
