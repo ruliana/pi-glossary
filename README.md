@@ -6,6 +6,8 @@ A [pi](https://github.com/nichochar/pi-coding-agent) extension that lazy-loads g
 
 This lets you keep a shared project vocabulary in one place without bloating every turn's prompt. Definitions are only injected when the current prompt references a matching glossary handle.
 
+More about it in [this blog post](https://ronie.medium.com/agent-glossary-teaching-agents-our-shared-language-93bae9674b02)
+
 ## How It Works
 
 1. On session start, the extension loads `~/.pi/agent/glossary.json` and `.pi/glossary.json` from the current project.
