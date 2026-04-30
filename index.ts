@@ -92,6 +92,47 @@ function summarizeGlossarySources(files: string[]): string {
 	return ` from ${files.join(" and ")}`;
 }
 
+function parseGlossaryFile(raw: string, glossaryFile: string): unknown[] {
+	if (glossaryFile.endsWith(".jsonl")) {
+		return raw
+			.split(/\r?\n/)
+			.map((line, index) => ({ line: line.trim(), lineNumber: index + 1 }))
+			.filter(({ line }) => line.length > 0)
+			.map(({ line, lineNumber }) => {
+				try {
+					return JSON.parse(line) as unknown;
+				} catch (error) {
+					throw new Error(
+						`Invalid glossary file ${glossaryFile}: line ${lineNumber} is not valid JSON (${error instanceof Error ? error.message : String(error)})`,
+					);
+				}
+			});
+	}
+
+	const parsed = JSON.parse(raw) as unknown;
+	if (!Array.isArray(parsed)) {
+		throw new Error(`Invalid glossary file ${glossaryFile}: root value must be an array`);
+	}
+	return parsed;
+}
+
+function resolveGlossaryFile(basePath: string): string {
+	const jsonFile = `${basePath}.json`;
+	const jsonlFile = `${basePath}.jsonl`;
+	const hasJson = fs.existsSync(jsonFile);
+	const hasJsonl = fs.existsSync(jsonlFile);
+
+	if (hasJson && hasJsonl) {
+		throw new Error(`Ambiguous glossary configuration: found both ${jsonFile} and ${jsonlFile}. Keep only one.`);
+	}
+
+	if (hasJsonl) {
+		return jsonlFile;
+	}
+
+	return jsonFile;
+}
+
 export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 	let entries: CompiledEntry[] = [];
 	let loadError: string | undefined;
@@ -109,10 +150,7 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 		}
 
 		const raw = fs.readFileSync(jsonFile, "utf8");
-		const parsed = JSON.parse(raw) as unknown;
-		if (!Array.isArray(parsed)) {
-			throw new Error(`Invalid glossary file ${jsonFile}: root value must be an array`);
-		}
+		const parsed = parseGlossaryFile(raw, jsonFile);
 
 		const sourceLabel = jsonFile.startsWith(os.homedir())
 			? jsonFile.replace(os.homedir(), "~")
@@ -135,10 +173,9 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 		entries = [];
 		loadError = undefined;
 
-		const globalFile = path.join(os.homedir(), ".pi", "agent", "glossary.json");
-		const projectFile = path.join(cwd, ".pi", "glossary.json");
-
 		try {
+			const globalFile = resolveGlossaryFile(path.join(os.homedir(), ".pi", "agent", "glossary"));
+			const projectFile = resolveGlossaryFile(path.join(cwd, ".pi", "glossary"));
 			const globalResult = loadGlossaryFile(globalFile, cwd);
 			const projectResult = loadGlossaryFile(projectFile, cwd);
 			const mergedEntries = new Map<string, GlossaryEntry>();

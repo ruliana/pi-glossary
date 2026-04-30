@@ -10,7 +10,7 @@ More about it in [this blog post](https://ronie.medium.com/agent-glossary-teachi
 
 ## How It Works
 
-1. On session start, the extension loads `~/.pi/agent/glossary.json` and `.pi/glossary.json` from the current project.
+1. On session start, the extension loads `~/.pi/agent/glossary.json` or `~/.pi/agent/glossary.jsonl`, and `.pi/glossary.json` or `.pi/glossary.jsonl` from the current project.
 2. Project entries override global entries when they use the same `term`.
 3. Before an agent starts, it scans the user's prompt for matching glossary terms, aliases, or explicit regex patterns.
 4. If terms match, only terms not already loaded in the current session are injected into the system prompt.
@@ -18,7 +18,7 @@ More about it in [this blog post](https://ronie.medium.com/agent-glossary-teachi
 
 ## What It Does
 
-- Loads glossary entries from a project-scoped `.pi/glossary.json`
+- Loads glossary entries from project-scoped `.pi/glossary.json` or `.pi/glossary.jsonl`
 - Matches canonical terms and optional aliases out of the box
 - Supports custom regex triggers per entry
 - Validates glossary entries and shows actionable errors
@@ -46,7 +46,9 @@ After installing or updating the extension, run:
 
 ## Project Configuration
 
-Create `~/.pi/agent/glossary.json` for global terms and/or `.pi/glossary.json` inside a project for project-specific terms:
+Create `~/.pi/agent/glossary.json` or `~/.pi/agent/glossary.jsonl` for global terms and/or `.pi/glossary.json` or `.pi/glossary.jsonl` inside a project for project-specific terms.
+
+JSON arrays continue to work:
 
 ```json
 [
@@ -63,7 +65,16 @@ Create `~/.pi/agent/glossary.json` for global terms and/or `.pi/glossary.json` i
 ]
 ```
 
-When the same `term` exists in both files, the project entry wins.
+JSON Lines is also supported, with one entry per line:
+
+```jsonl
+{"term":"explore-plan-execute-review","aliases":["EPER"],"definition":"Spawn a team of subagents to explore, plan, execute, and review a task end to end."}
+{"term":"finance-safe","pattern":"(?:^|[^\\w])finance-safe(?:$|[^\\w])","definition":"Use the conservative workflow: explicit assumptions, no destructive actions, and a reviewer pass before execution."}
+```
+
+When the same `term` exists in both scopes, the project entry wins.
+
+If both `.json` and `.jsonl` exist in the same scope, the extension raises an error and asks you to keep only one.
 
 ## Glossary Entry Fields
 
@@ -104,17 +115,17 @@ Use `pattern` when you want total control over matching.
 | Command | Description |
 |---------|-------------|
 | `/glossary` | Show whether the glossary is loaded |
-| `/glossary reload` | Reload `~/.pi/agent/glossary.json` and `.pi/glossary.json` without restarting pi |
+| `/glossary reload` | Reload `~/.pi/agent/glossary.json` or `~/.pi/agent/glossary.jsonl`, and `.pi/glossary.json` or `.pi/glossary.jsonl`, without restarting pi |
 
 Any other form, such as `/glossary something`, shows a usage hint instead of doing a partial lookup.
 
 ## Notes
 
-- The extension is user-scoped, and glossary data can be global (`~/.pi/agent/glossary.json`) or project-scoped (`.pi/glossary.json`).
+- The extension is user-scoped, and glossary data can be global (`~/.pi/agent/glossary.json` or `~/.pi/agent/glossary.jsonl`) or project-scoped (`.pi/glossary.json` or `.pi/glossary.jsonl`).
 - Nothing is injected when the prompt does not mention a glossary handle.
 - Once a term is loaded in a session, mentioning it again does not inject it again.
 - If you edit the extension itself, run `/reload`.
-- If you edit either glossary file, run `/glossary reload`.
+- If you edit any glossary file (`glossary.json` or `glossary.jsonl`), run `/glossary reload`.
 
 ## License
 
