@@ -30,8 +30,16 @@ type ScopeInfo = {
 	sources: ScopeActivationSource[];
 };
 
+type SupabaseConfig = {
+	url: string;
+	anonKey: string;
+	accessToken?: string;
+	enabled?: boolean;
+};
+
 type GlossaryConfig = {
 	enabledScopes?: string[];
+	supabase?: SupabaseConfig;
 };
 
 type CompiledEntry = GlossaryEntry & {
@@ -50,6 +58,22 @@ type ConflictWarning = {
 	term: string;
 	winner: string;
 	shadowed: string[];
+};
+
+type SupabaseRow = {
+	scope: string;
+	term: string;
+	definition: string;
+	aliases: string[] | null;
+	pattern?: string | null;
+	flags?: string | null;
+	source?: string | null;
+};
+
+type RemoteLoadResult = {
+	entries: GlossaryEntry[];
+	error?: string;
+	skipped: boolean;
 };
 
 // ── Parsing layer ─────────────────────────────────────────────────────────────
@@ -240,6 +264,50 @@ function loadGlossaryFile(glossaryFile: string, cwd: string): FileLoadResult {
 	return { found: true, entries, scopeRefs, path: glossaryFile, label: sourceLabel };
 }
 
+async function loadRemoteEntries(supabase: SupabaseConfig, activeScopes: Set<string>): Promise<RemoteLoadResult> {
+	if (!supabase.enabled) {
+		return { entries: [], skipped: true };
+	}
+
+	if (!supabase.accessToken) {
+		return { entries: [], error: "no access token configured", skipped: false };
+	}
+
+	const scopeList = Array.from(activeScopes).join(",");
+	const url = `${supabase.url}/rest/v1/glossary_entry?select=scope,term,definition,aliases,pattern,flags,source&scope=in.(${scopeList})&enabled=eq.true`;
+
+	try {
+		const response = await fetch(url, {
+			headers: {
+				apikey: supabase.anonKey,
+				Authorization: `Bearer ${supabase.accessToken}`,
+				"Content-Type": "application/json",
+			},
+		});
+
+		if (!response.ok) {
+			const text = await response.text();
+			return { entries: [], error: `HTTP ${response.status}: ${text}`, skipped: false };
+		}
+
+		const rows = (await response.json()) as SupabaseRow[];
+
+		const entries: GlossaryEntry[] = rows.map((row) => ({
+			term: row.term,
+			definition: row.definition,
+			aliases: row.aliases ?? [],
+			pattern: row.pattern ?? undefined,
+			flags: row.flags ?? undefined,
+			source: row.source ?? `supabase:${row.scope}`,
+			scopes: [row.scope],
+		}));
+
+		return { entries, skipped: false };
+	} catch (error) {
+		return { entries: [], error: error instanceof Error ? error.message : String(error), skipped: false };
+	}
+}
+
 // ── Scope activation layer ────────────────────────────────────────────────────
 
 function computeActiveScopes(
@@ -272,6 +340,7 @@ function entryMatchesActiveScopes(entry: GlossaryEntry, activeScopes: Set<string
 
 function mergeEntries(
 	globalEntries: GlossaryEntry[],
+	supabaseEntries: GlossaryEntry[],
 	projectEntries: GlossaryEntry[],
 ): { merged: Map<string, GlossaryEntry>; conflicts: ConflictWarning[] } {
 	const merged = new Map<string, GlossaryEntry>();
@@ -282,9 +351,18 @@ function mergeEntries(
 		merged.set(entry.term, entry);
 	}
 
-	// Conflict detection between non-project sources happens here.
-	// Phase 1 has only one non-project source (global), so no conflicts are possible yet.
-	// Phase 2 will add Supabase entries before this block.
+	// Supabase overrides global; conflict is detected when both define the same term
+	for (const entry of supabaseEntries) {
+		const existing = merged.get(entry.term);
+		if (existing) {
+			conflicts.push({
+				term: entry.term,
+				winner: entry.source ?? "supabase",
+				shadowed: [existing.source ?? "global"],
+			});
+		}
+		merged.set(entry.term, entry);
+	}
 
 	// Project overrides everything; no warning needed
 	for (const entry of projectEntries) {
@@ -302,11 +380,19 @@ function summarizeGlossarySources(files: string[]): string {
 	return ` from ${files.join(" and ")}`;
 }
 
+function maskKey(key: string): string {
+	if (key.length <= 8) return "****";
+	return `${key.slice(0, 4)}...${key.slice(-4)}`;
+}
+
 // ── Extension ─────────────────────────────────────────────────────────────────
 
 export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 	let entries: CompiledEntry[] = [];
 	let loadError: string | undefined;
+	let remoteError: string | undefined;
+	let remoteSkipped = true;
+	let remoteCount = 0;
 	let loadedTermsForSession = new Set<string>();
 	let activeScopes: ScopeInfo[] = [{ scope: "default", sources: ["implicit"] }];
 
@@ -316,9 +402,12 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 		}
 	};
 
-	const loadGlossary = (cwd: string) => {
+	const loadGlossary = async (cwd: string) => {
 		entries = [];
 		loadError = undefined;
+		remoteError = undefined;
+		remoteSkipped = true;
+		remoteCount = 0;
 
 		try {
 			const config = loadConfig();
@@ -333,7 +422,19 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 			const filteredGlobal = globalResult.entries.filter((e) => entryMatchesActiveScopes(e, activeScopeSet));
 			const filteredProject = projectResult.entries.filter((e) => entryMatchesActiveScopes(e, activeScopeSet));
 
-			const { merged, conflicts } = mergeEntries(filteredGlobal, filteredProject);
+			let supabaseEntries: GlossaryEntry[] = [];
+			if (config.supabase) {
+				const remoteResult = await loadRemoteEntries(config.supabase, activeScopeSet);
+				remoteSkipped = remoteResult.skipped;
+				if (remoteResult.error) {
+					remoteError = remoteResult.error;
+				} else {
+					supabaseEntries = remoteResult.entries;
+					remoteCount = supabaseEntries.length;
+				}
+			}
+
+			const { merged, conflicts } = mergeEntries(filteredGlobal, supabaseEntries, filteredProject);
 
 			entries = Array.from(merged.values()).map((entry, index) => {
 				try {
@@ -369,7 +470,7 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 	};
 
 	pi.registerCommand("glossary", {
-		description: "Show, reload, or manage glossary scopes",
+		description: "Show, reload, or manage glossary scopes and Supabase connection",
 		handler: async (args, ctx) => {
 			const trimmed = args.trim();
 			const parts = trimmed.split(/\s+/).filter(Boolean);
@@ -379,10 +480,13 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 				if (subcommand === "reload") {
 					loadedTermsForSession = new Set<string>();
 					updateGlossaryWidget(ctx);
-					const result = loadGlossary(ctx.cwd);
+					const result = await loadGlossary(ctx.cwd);
 					if (result.error) {
 						ctx.ui.notify(`Glossary reload failed: ${result.error}`, "error");
 						return;
+					}
+					if (remoteError) {
+						ctx.ui.notify(`Supabase load failed (local entries still active): ${remoteError}`, "warning");
 					}
 					for (const conflict of result.conflicts) {
 						ctx.ui.notify(
@@ -438,10 +542,13 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 					}
 					loadedTermsForSession = new Set<string>();
 					updateGlossaryWidget(ctx);
-					const result = loadGlossary(ctx.cwd);
+					const result = await loadGlossary(ctx.cwd);
 					if (result.error) {
 						ctx.ui.notify(`Glossary reload failed: ${result.error}`, "error");
 						return;
+					}
+					if (remoteError) {
+						ctx.ui.notify(`Supabase load failed (local entries still active): ${remoteError}`, "warning");
 					}
 					ctx.ui.notify(
 						`Scope "${scopeName}" enabled. Glossary reloaded: ${result.count} entr${result.count === 1 ? "y" : "ies"}.`,
@@ -460,10 +567,13 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 					saveConfig(config);
 					loadedTermsForSession = new Set<string>();
 					updateGlossaryWidget(ctx);
-					const result = loadGlossary(ctx.cwd);
+					const result = await loadGlossary(ctx.cwd);
 					if (result.error) {
 						ctx.ui.notify(`Glossary reload failed: ${result.error}`, "error");
 						return;
+					}
+					if (remoteError) {
+						ctx.ui.notify(`Supabase load failed (local entries still active): ${remoteError}`, "warning");
 					}
 					ctx.ui.notify(
 						`Scope "${scopeName}" disabled. Glossary reloaded: ${result.count} entr${result.count === 1 ? "y" : "ies"}.`,
@@ -479,8 +589,46 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 				return;
 			}
 
+			if (subcommand === "supabase") {
+				const action = parts[1] ?? "";
+
+				if (action === "status") {
+					const config = loadConfig();
+					const sb = config.supabase;
+
+					if (!sb) {
+						ctx.ui.notify(
+							"Supabase: not configured\n\nTo configure, add a \"supabase\" section to ~/.pi/agent/glossary.config.json",
+							"info",
+						);
+						return;
+					}
+
+					const lines: string[] = [
+						`Supabase: ${sb.enabled ? "enabled" : "disabled"}`,
+						`URL: ${sb.url}`,
+						`Anon key: ${maskKey(sb.anonKey)}`,
+						`Access token: ${sb.accessToken ? maskKey(sb.accessToken) : "not set"}`,
+					];
+
+					if (remoteSkipped) {
+						lines.push("Remote load: skipped (disabled or no access token)");
+					} else if (remoteError) {
+						lines.push(`Remote load: failed — ${remoteError}`);
+					} else {
+						lines.push(`Remote load: ${remoteCount} entr${remoteCount === 1 ? "y" : "ies"} loaded`);
+					}
+
+					ctx.ui.notify(lines.join("\n"), "info");
+					return;
+				}
+
+				ctx.ui.notify("Usage: /glossary supabase status", "warning");
+				return;
+			}
+
 			ctx.ui.notify(
-				"Usage: /glossary [reload] | /glossary scopes | /glossary scope enable <scope> | /glossary scope disable <scope>",
+				"Usage: /glossary [reload] | /glossary scopes | /glossary scope enable <scope> | /glossary scope disable <scope> | /glossary supabase status",
 				"warning",
 			);
 		},
@@ -489,10 +637,13 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		loadedTermsForSession = new Set<string>();
 		updateGlossaryWidget(ctx);
-		const result = loadGlossary(ctx.cwd);
+		const result = await loadGlossary(ctx.cwd);
 		if (result.error) {
 			ctx.ui.notify(`Glossary load failed: ${result.error}`, "error");
 			return;
+		}
+		if (remoteError) {
+			ctx.ui.notify(`Supabase load failed (local entries still active): ${remoteError}`, "warning");
 		}
 		for (const conflict of result.conflicts) {
 			ctx.ui.notify(

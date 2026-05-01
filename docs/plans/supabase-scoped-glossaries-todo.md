@@ -27,20 +27,20 @@
 
 ## Phase 2: private Supabase connector
 
-- [ ] Add local config model for Supabase connection settings
-- [ ] Decide local storage format/path for connector config
-- [ ] Add Supabase client initialization
-- [ ] Add authenticated access flow for private use
-- [ ] Load remote entries from `glossary_entry` for active scopes only
-- [ ] Merge remote entries with local entries using precedence:
-  - [ ] project local
-  - [ ] Supabase
-  - [ ] global local
-- [ ] Warn on conflicting non-project definitions
-- [ ] Keep Supabase failures non-fatal when local entries exist
-- [ ] Add `/glossary supabase status`
-- [ ] Expose remote load/auth failures clearly in status output
-- [ ] Update README with private Supabase setup guidance
+- [x] Add local config model for Supabase connection settings
+- [x] Decide local storage format/path for connector config (`~/.pi/agent/glossary.config.json`)
+- [x] Add Supabase client initialization (native fetch against REST API)
+- [x] Add authenticated access flow for private use (Bearer token + anon key headers)
+- [x] Load remote entries from `glossary_entry` for active scopes only
+- [x] Merge remote entries with local entries using precedence:
+  - [x] project local
+  - [x] Supabase
+  - [x] global local
+- [x] Warn on conflicting non-project definitions
+- [x] Keep Supabase failures non-fatal when local entries exist
+- [x] Add `/glossary supabase status`
+- [x] Expose remote load/auth failures clearly in status output
+- [x] Update README with private Supabase setup guidance
 
 ## Phase 3: Supabase initialization workflow
 
@@ -72,7 +72,7 @@
 ## Cross-cutting work
 
 - [x] Keep session-level loaded-term deduplication unchanged
-- [ ] Ensure `/glossary reload` refreshes scopes and remote entries
+- [x] Ensure `/glossary reload` refreshes scopes and remote entries
 - [x] Ensure load errors remain actionable
 - [x] Ensure warnings are summarized, not noisy
 - [ ] Add tests for:

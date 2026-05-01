@@ -127,15 +127,115 @@ Run `/glossary scopes` to see all active scopes and their sources.
 
 ## User Config
 
-The extension stores user-level scope preferences in `~/.pi/agent/glossary.config.json`:
+The extension stores user-level preferences in `~/.pi/agent/glossary.config.json`:
 
 ```json
 {
-  "enabledScopes": ["team/core", "project/payments"]
+  "enabledScopes": ["team/core", "project/payments"],
+  "supabase": {
+    "url": "https://your-project.supabase.co",
+    "anonKey": "your-anon-key",
+    "accessToken": "your-user-jwt",
+    "enabled": true
+  }
 }
 ```
 
-This file is managed automatically by the scope commands. You can edit it directly if needed.
+The `enabledScopes` field is managed automatically by the scope commands. The `supabase` section is configured manually until `/glossary init supabase` is available (Phase 3).
+
+## Private Supabase Glossary
+
+The extension can load glossary entries from a private Supabase project in addition to local files.
+
+### How it works
+
+- Supabase entries are loaded for active scopes only
+- RLS policies on the `glossary_entry` table restrict visibility to the authenticated user's rows
+- Local files load regardless of Supabase availability
+- If the Supabase connection fails, local entries remain active and a warning is shown
+
+### Table schema
+
+Create a `glossary_entry` table with these columns:
+
+```sql
+create table glossary_entry (
+  id uuid primary key default gen_random_uuid(),
+  scope text not null,
+  term text not null,
+  definition text not null,
+  aliases jsonb not null default '[]'::jsonb,
+  pattern text null,
+  flags text null,
+  enabled boolean not null default true,
+  source text null,
+  owner_user_id uuid not null,
+  visibility text not null default 'private',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- Constraints
+alter table glossary_entry add constraint glossary_entry_scope_nonempty check (scope <> '');
+alter table glossary_entry add constraint glossary_entry_term_nonempty check (term <> '');
+alter table glossary_entry add constraint glossary_entry_definition_nonempty check (definition <> '');
+
+-- Indexes
+create unique index glossary_entry_owner_scope_term on glossary_entry (owner_user_id, scope, term);
+create index glossary_entry_owner_scope on glossary_entry (owner_user_id, scope);
+
+-- RLS
+alter table glossary_entry enable row level security;
+
+create policy "users can select own rows"
+  on glossary_entry for select
+  using (owner_user_id = auth.uid());
+
+create policy "users can insert own rows"
+  on glossary_entry for insert
+  with check (owner_user_id = auth.uid());
+
+create policy "users can update own rows"
+  on glossary_entry for update
+  using (owner_user_id = auth.uid());
+
+create policy "users can delete own rows"
+  on glossary_entry for delete
+  using (owner_user_id = auth.uid());
+```
+
+### Configuration
+
+Add the `supabase` section to `~/.pi/agent/glossary.config.json`:
+
+```json
+{
+  "supabase": {
+    "url": "https://your-project.supabase.co",
+    "anonKey": "your-anon-key",
+    "accessToken": "your-user-jwt",
+    "enabled": true
+  }
+}
+```
+
+- **url**: Your Supabase project URL (found in Project Settings → API)
+- **anonKey**: Your project's anonymous key (found in Project Settings → API)
+- **accessToken**: A user JWT obtained after signing in; the extension uses this to authenticate requests and RLS enforces row ownership
+- **enabled**: Set to `false` to disable remote loading without removing the config
+
+### Getting an access token
+
+Use the Supabase CLI or your project's Auth flow to sign in and retrieve a session JWT. The token is the `access_token` field from the session response.
+
+### Troubleshooting
+
+Run `/glossary supabase status` to see:
+
+- whether Supabase is configured and enabled
+- the configured URL
+- whether an access token is present
+- the result of the last remote load attempt
 
 ## Glossary Entry Fields
 
@@ -179,10 +279,11 @@ Only entries whose scopes overlap with the active scopes are eligible for matchi
 | Command | Description |
 |---------|-------------|
 | `/glossary` | Show whether the glossary is loaded |
-| `/glossary reload` | Reload all glossary files and reset the session |
+| `/glossary reload` | Reload all glossary files and remote entries; reset the session |
 | `/glossary scopes` | List active scopes and their activation sources |
 | `/glossary scope enable <scope>` | Enable a scope and persist it in user config |
 | `/glossary scope disable <scope>` | Disable a scope and remove it from user config |
+| `/glossary supabase status` | Show Supabase connection state and last remote load result |
 
 ## Notes
 
