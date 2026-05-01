@@ -44,23 +44,23 @@
 
 ## Phase 3: Supabase initialization workflow
 
-- [ ] Add `/glossary init supabase`
-- [ ] Prompt for Supabase URL
-- [ ] Prompt for Supabase anon key
-- [ ] Validate connectivity
-- [ ] Create `glossary_entry` table if missing
-- [ ] Add required constraints
-- [ ] Add required indexes
-- [ ] Enable RLS
-- [ ] Add RLS policies for:
-  - [ ] select own rows
-  - [ ] insert own rows
-  - [ ] update own rows
-  - [ ] delete own rows
-- [ ] Persist connector config locally
-- [ ] Validate the configured connection after setup
-- [ ] Print next steps for authentication and usage
-- [ ] Document generated SQL / provisioning behavior
+- [x] Add `/glossary init supabase`
+- [x] Prompt for Supabase URL
+- [x] Prompt for Supabase anon key
+- [x] Validate connectivity
+- [x] Create `glossary_entry` table if missing (displays provisioning SQL; user runs it in SQL editor)
+- [x] Add required constraints
+- [x] Add required indexes
+- [x] Enable RLS
+- [x] Add RLS policies for:
+  - [x] select own rows
+  - [x] insert own rows
+  - [x] update own rows
+  - [x] delete own rows
+- [x] Persist connector config locally
+- [x] Validate the configured connection after setup
+- [x] Print next steps for authentication and usage
+- [x] Document generated SQL / provisioning behavior
 
 ## Phase 4: remote glossary management follow-ups
 

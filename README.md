@@ -204,9 +204,20 @@ create policy "users can delete own rows"
   using (owner_user_id = auth.uid());
 ```
 
-### Configuration
+### Setup
 
-Add the `supabase` section to `~/.pi/agent/glossary.config.json`:
+Run `/glossary init supabase` to walk through the full setup:
+
+1. Enter your Supabase project URL and anon key (from Project Settings → API in the Supabase dashboard)
+2. Sign in with your Supabase account email and password to obtain a session token
+3. If the `glossary_entry` table does not exist, the command shows the provisioning SQL to run in the Supabase SQL editor
+4. After confirming the schema is ready, the config is saved and the glossary reloads
+
+The command can be re-run at any time to update the URL, anon key, or credentials.
+
+### Manual configuration
+
+You can also edit `~/.pi/agent/glossary.config.json` directly:
 
 ```json
 {
@@ -219,14 +230,14 @@ Add the `supabase` section to `~/.pi/agent/glossary.config.json`:
 }
 ```
 
-- **url**: Your Supabase project URL (found in Project Settings → API)
-- **anonKey**: Your project's anonymous key (found in Project Settings → API)
-- **accessToken**: A user JWT obtained after signing in; the extension uses this to authenticate requests and RLS enforces row ownership
+- **url**: Supabase project URL (Project Settings → API)
+- **anonKey**: Project anonymous key (Project Settings → API)
+- **accessToken**: User JWT from a Supabase Auth session; RLS uses this to enforce row ownership
 - **enabled**: Set to `false` to disable remote loading without removing the config
 
-### Getting an access token
+### Access token expiry
 
-Use the Supabase CLI or your project's Auth flow to sign in and retrieve a session JWT. The token is the `access_token` field from the session response.
+Supabase JWTs expire after one hour by default. When the token expires, `/glossary supabase status` shows the auth error, and `/glossary init supabase` can re-sign you in without reconfiguring the URL or anon key.
 
 ### Troubleshooting
 
@@ -284,6 +295,7 @@ Only entries whose scopes overlap with the active scopes are eligible for matchi
 | `/glossary scope enable <scope>` | Enable a scope and persist it in user config |
 | `/glossary scope disable <scope>` | Disable a scope and remove it from user config |
 | `/glossary supabase status` | Show Supabase connection state and last remote load result |
+| `/glossary init supabase` | Interactive setup: configure connection, sign in, and provision schema |
 
 ## Notes
 

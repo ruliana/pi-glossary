@@ -351,7 +351,7 @@ function mergeEntries(
 		merged.set(entry.term, entry);
 	}
 
-	// Supabase overrides global; conflict is detected when both define the same term
+	// Supabase overrides global; conflict detected when both define the same term
 	for (const entry of supabaseEntries) {
 		const existing = merged.get(entry.term);
 		if (existing) {
@@ -370,6 +370,123 @@ function mergeEntries(
 	}
 
 	return { merged, conflicts };
+}
+
+// ── Provisioning layer ────────────────────────────────────────────────────────
+
+const PROVISIONING_SQL = `-- Create glossary_entry table
+create table if not exists glossary_entry (
+  id uuid primary key default gen_random_uuid(),
+  scope text not null,
+  term text not null,
+  definition text not null,
+  aliases jsonb not null default '[]'::jsonb,
+  pattern text null,
+  flags text null,
+  enabled boolean not null default true,
+  source text null,
+  owner_user_id uuid not null,
+  visibility text not null default 'private',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- Constraints
+alter table glossary_entry
+  add constraint glossary_entry_scope_nonempty check (scope <> ''),
+  add constraint glossary_entry_term_nonempty check (term <> ''),
+  add constraint glossary_entry_definition_nonempty check (definition <> '');
+
+-- Indexes
+create unique index if not exists glossary_entry_owner_scope_term
+  on glossary_entry (owner_user_id, scope, term);
+create index if not exists glossary_entry_owner_scope
+  on glossary_entry (owner_user_id, scope);
+
+-- Row-level security
+alter table glossary_entry enable row level security;
+
+drop policy if exists "users can select own rows" on glossary_entry;
+create policy "users can select own rows"
+  on glossary_entry for select
+  using (owner_user_id = auth.uid());
+
+drop policy if exists "users can insert own rows" on glossary_entry;
+create policy "users can insert own rows"
+  on glossary_entry for insert
+  with check (owner_user_id = auth.uid());
+
+drop policy if exists "users can update own rows" on glossary_entry;
+create policy "users can update own rows"
+  on glossary_entry for update
+  using (owner_user_id = auth.uid());
+
+drop policy if exists "users can delete own rows" on glossary_entry;
+create policy "users can delete own rows"
+  on glossary_entry for delete
+  using (owner_user_id = auth.uid());`;
+
+async function checkConnectivity(url: string, anonKey: string): Promise<{ ok: boolean; error?: string }> {
+	try {
+		const response = await fetch(`${url}/rest/v1/`, {
+			headers: { apikey: anonKey },
+		});
+		if (!response.ok) {
+			const text = await response.text();
+			return { ok: false, error: `HTTP ${response.status}: ${text.slice(0, 200)}` };
+		}
+		return { ok: true };
+	} catch (error) {
+		return { ok: false, error: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+async function signInWithPassword(
+	url: string,
+	anonKey: string,
+	email: string,
+	password: string,
+): Promise<{ accessToken?: string; error?: string }> {
+	try {
+		const response = await fetch(`${url}/auth/v1/token?grant_type=password`, {
+			method: "POST",
+			headers: {
+				apikey: anonKey,
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ email, password }),
+		});
+		if (!response.ok) {
+			const data = (await response.json()) as { error_description?: string; message?: string };
+			return { error: data.error_description ?? data.message ?? `HTTP ${response.status}` };
+		}
+		const data = (await response.json()) as { access_token: string };
+		return { accessToken: data.access_token };
+	} catch (error) {
+		return { error: error instanceof Error ? error.message : String(error) };
+	}
+}
+
+async function checkTableExists(
+	url: string,
+	anonKey: string,
+	accessToken: string,
+): Promise<{ exists: boolean; error?: string }> {
+	try {
+		const response = await fetch(`${url}/rest/v1/glossary_entry?limit=0`, {
+			headers: {
+				apikey: anonKey,
+				Authorization: `Bearer ${accessToken}`,
+			},
+		});
+		if (response.ok) return { exists: true };
+		const data = (await response.json()) as { code?: string; message?: string };
+		// PostgREST error code for undefined table
+		if (data.code === "42P01") return { exists: false };
+		return { exists: false, error: data.message ?? `HTTP ${response.status}` };
+	} catch (error) {
+		return { exists: false, error: error instanceof Error ? error.message : String(error) };
+	}
 }
 
 // ── Utility ───────────────────────────────────────────────────────────────────
@@ -598,7 +715,7 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 
 					if (!sb) {
 						ctx.ui.notify(
-							"Supabase: not configured\n\nTo configure, add a \"supabase\" section to ~/.pi/agent/glossary.config.json",
+							"Supabase: not configured\n\nRun /glossary init supabase to set up.",
 							"info",
 						);
 						return;
@@ -623,12 +740,191 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 					return;
 				}
 
-				ctx.ui.notify("Usage: /glossary supabase status", "warning");
+				ctx.ui.notify(
+					"Usage: /glossary supabase status\n\nTo set up Supabase, run: /glossary init supabase",
+					"warning",
+				);
+				return;
+			}
+
+			if (subcommand === "init") {
+				const target = parts[1] ?? "";
+
+				if (target !== "supabase") {
+					ctx.ui.notify("Usage: /glossary init supabase", "warning");
+					return;
+				}
+
+				if (!ctx.hasUI) {
+					ctx.ui.notify("Supabase init requires interactive mode.", "error");
+					return;
+				}
+
+				const config = loadConfig();
+				const existing = config.supabase;
+
+				// ── Step 1: Connection ────────────────────────────────────────
+
+				let updateConnection = true;
+				if (existing) {
+					updateConnection = await ctx.ui.confirm(
+						"Reconfigure Supabase connection?",
+						`Current URL: ${existing.url}\nAnon key: ${maskKey(existing.anonKey)}\n\nUpdate these values?`,
+					);
+				}
+
+				let url = existing?.url ?? "";
+				let anonKey = existing?.anonKey ?? "";
+
+				if (updateConnection) {
+					const urlInput = await ctx.ui.input(
+						"Supabase project URL",
+						existing?.url ?? "https://your-project.supabase.co",
+					);
+					if (urlInput === undefined) return;
+					url = urlInput.trim() || existing?.url || "";
+					if (!url) {
+						ctx.ui.notify("URL is required.", "error");
+						return;
+					}
+
+					const keyInput = await ctx.ui.input(
+						"Supabase anon key",
+						existing ? maskKey(existing.anonKey) : "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+					);
+					if (keyInput === undefined) return;
+					// Keep existing key if user submitted empty (they saw the masked value)
+					anonKey = keyInput.trim() || existing?.anonKey || "";
+					if (!anonKey) {
+						ctx.ui.notify("Anon key is required.", "error");
+						return;
+					}
+
+					// Validate connectivity
+					ctx.ui.notify("Checking connectivity...", "info");
+					const connResult = await checkConnectivity(url, anonKey);
+					if (!connResult.ok) {
+						ctx.ui.notify(`Connectivity check failed: ${connResult.error}`, "error");
+						return;
+					}
+					ctx.ui.notify("Connection OK.", "info");
+				}
+
+				// ── Step 2: Credentials ───────────────────────────────────────
+
+				let accessToken = existing?.accessToken;
+				let doSignIn = !accessToken;
+
+				if (accessToken) {
+					doSignIn = await ctx.ui.confirm(
+						"Update credentials?",
+						"An access token is already stored. Sign in again to replace it?",
+					);
+				}
+
+				if (doSignIn) {
+					const email = await ctx.ui.input("Supabase account email", "you@example.com");
+					if (email === undefined) return;
+					if (!email.trim()) {
+						ctx.ui.notify("Email is required.", "error");
+						return;
+					}
+
+					const password = await ctx.ui.input("Supabase account password (input is visible)", "");
+					if (password === undefined) return;
+					if (!password) {
+						ctx.ui.notify("Password is required.", "error");
+						return;
+					}
+
+					ctx.ui.notify("Signing in...", "info");
+					const signInResult = await signInWithPassword(url, anonKey, email.trim(), password);
+					if (signInResult.error) {
+						ctx.ui.notify(`Sign-in failed: ${signInResult.error}`, "error");
+						return;
+					}
+					accessToken = signInResult.accessToken;
+					ctx.ui.notify("Signed in.", "info");
+				}
+
+				if (!accessToken) {
+					ctx.ui.notify("No access token available. Cannot proceed.", "error");
+					return;
+				}
+
+				// ── Step 3: Schema check and provisioning ─────────────────────
+
+				ctx.ui.notify("Checking table...", "info");
+				const tableResult = await checkTableExists(url, anonKey, accessToken);
+
+				if (!tableResult.exists) {
+					const reason = tableResult.error ? ` (${tableResult.error})` : "";
+					ctx.ui.notify(
+						`Table not found${reason}.\n\nRun the following SQL in the Supabase SQL editor (https://supabase.com/dashboard → SQL Editor):\n\n${PROVISIONING_SQL}`,
+						"warning",
+					);
+
+					const confirmed = await ctx.ui.confirm(
+						"Schema ready?",
+						"Have you run the provisioning SQL in the Supabase SQL editor?",
+					);
+					if (!confirmed) {
+						ctx.ui.notify(
+							"Setup cancelled. Run /glossary init supabase again after provisioning the schema.",
+							"info",
+						);
+						return;
+					}
+
+					ctx.ui.notify("Re-checking table...", "info");
+					const recheck = await checkTableExists(url, anonKey, accessToken);
+					if (!recheck.exists) {
+						const recheckReason = recheck.error ?? "table still not found";
+						ctx.ui.notify(
+							`Table still not accessible: ${recheckReason}\n\nVerify the SQL ran without errors, then run /glossary init supabase again.`,
+							"error",
+						);
+						return;
+					}
+				}
+
+				ctx.ui.notify("Table OK.", "info");
+
+				// ── Step 4: Save config and reload ────────────────────────────
+
+				const newConfig: GlossaryConfig = {
+					...config,
+					supabase: {
+						url,
+						anonKey,
+						accessToken,
+						enabled: true,
+					},
+				};
+				saveConfig(newConfig);
+
+				loadedTermsForSession = new Set<string>();
+				updateGlossaryWidget(ctx);
+				const reloadResult = await loadGlossary(ctx.cwd);
+
+				if (reloadResult.error) {
+					ctx.ui.notify(`Config saved, but glossary reload failed: ${reloadResult.error}`, "warning");
+					return;
+				}
+				if (remoteError) {
+					ctx.ui.notify(`Config saved, but remote load failed: ${remoteError}`, "warning");
+					return;
+				}
+
+				ctx.ui.notify(
+					`Supabase configured.\n\nConfig saved to: ${configPath}\nRemote entries loaded: ${remoteCount}\nTotal glossary entries: ${reloadResult.count}\n\nAdd entries to your Supabase table with scope values matching your active scopes. Run /glossary scopes to see active scopes.`,
+					"info",
+				);
 				return;
 			}
 
 			ctx.ui.notify(
-				"Usage: /glossary [reload] | /glossary scopes | /glossary scope enable <scope> | /glossary scope disable <scope> | /glossary supabase status",
+				"Usage: /glossary [reload] | /glossary scopes | /glossary scope enable <scope> | /glossary scope disable <scope> | /glossary supabase status | /glossary init supabase",
 				"warning",
 			);
 		},
