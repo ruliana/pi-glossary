@@ -21,6 +21,7 @@ More about it in [this blog post](https://ronie.medium.com/agent-glossary-teachi
 - Loads glossary entries from project-scoped `.pi/glossary.json` or `.pi/glossary.jsonl`
 - Matches canonical terms and optional aliases out of the box
 - Supports custom regex triggers per entry
+- Supports scopes to organize entries and control which are active per session or directory
 - Validates glossary entries and shows actionable errors
 - Reloads glossary configuration without restarting pi
 - Shows loaded glossary handles in the footer status for the whole session
@@ -76,6 +77,66 @@ When the same `term` exists in both scopes, the project entry wins.
 
 If both `.json` and `.jsonl` exist in the same scope, the extension raises an error and asks you to keep only one.
 
+## Scopes
+
+Scopes let you group entries and control which ones are active per session or directory.
+
+### Assigning scopes to entries
+
+Add a `scopes` field to any entry:
+
+```json
+[
+  {
+    "term": "chargeback",
+    "definition": "A disputed card transaction reversed by the issuing bank.",
+    "scopes": ["domain/payments", "client/acme"]
+  },
+  {
+    "term": "EPER",
+    "definition": "Explore, plan, execute, review.",
+    "scopes": ["team/core"]
+  }
+]
+```
+
+Entries without a `scopes` field belong to the implicit `default` scope and are always active.
+
+### Auto-enabling scopes from a project file
+
+Add `scope-ref` records to a project glossary file to automatically enable scopes whenever Pi starts in that directory:
+
+```jsonl
+{"type":"scope-ref","scope":"team/core"}
+{"type":"scope-ref","scope":"project/payments"}
+{"term":"chargeback","definition":"A disputed card transaction.","scopes":["project/payments"]}
+```
+
+Global glossary files can also contain `scope-ref` records to enable scopes for all sessions.
+
+### Scope activation sources
+
+A scope can be active because of:
+
+- `implicit` — the `default` scope, always active
+- `global` — a `scope-ref` in `~/.pi/agent/glossary.json` or `.jsonl`
+- `project` — a `scope-ref` in `.pi/glossary.json` or `.pi/glossary.jsonl`
+- `user` — explicitly enabled via `/glossary scope enable`
+
+Run `/glossary scopes` to see all active scopes and their sources.
+
+## User Config
+
+The extension stores user-level scope preferences in `~/.pi/agent/glossary.config.json`:
+
+```json
+{
+  "enabledScopes": ["team/core", "project/payments"]
+}
+```
+
+This file is managed automatically by the scope commands. You can edit it directly if needed.
+
 ## Glossary Entry Fields
 
 | Field | Required | Description |
@@ -87,6 +148,7 @@ If both `.json` and `.jsonl` exist in the same scope, the extension raises an er
 | `flags` | No | Regex flags, defaults to `iu` |
 | `enabled` | No | Set to `false` to disable an entry |
 | `source` | No | Descriptive provenance string included in injected context |
+| `scopes` | No | Scopes this entry belongs to; defaults to `["default"]` |
 
 ## Validation
 
@@ -110,14 +172,17 @@ That means these work well out of the box:
 
 Use `pattern` when you want total control over matching.
 
+Only entries whose scopes overlap with the active scopes are eligible for matching.
+
 ## Commands
 
 | Command | Description |
 |---------|-------------|
 | `/glossary` | Show whether the glossary is loaded |
-| `/glossary reload` | Reload `~/.pi/agent/glossary.json` or `~/.pi/agent/glossary.jsonl`, and `.pi/glossary.json` or `.pi/glossary.jsonl`, without restarting pi |
-
-Any other form, such as `/glossary something`, shows a usage hint instead of doing a partial lookup.
+| `/glossary reload` | Reload all glossary files and reset the session |
+| `/glossary scopes` | List active scopes and their activation sources |
+| `/glossary scope enable <scope>` | Enable a scope and persist it in user config |
+| `/glossary scope disable <scope>` | Disable a scope and remove it from user config |
 
 ## Notes
 
@@ -126,6 +191,7 @@ Any other form, such as `/glossary something`, shows a usage hint instead of doi
 - Once a term is loaded in a session, mentioning it again does not inject it again.
 - If you edit the extension itself, run `/reload`.
 - If you edit any glossary file (`glossary.json` or `glossary.jsonl`), run `/glossary reload`.
+- Project `scope-ref` records take effect immediately on the next session start or `/glossary reload`.
 
 ## License
 
