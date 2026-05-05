@@ -32,8 +32,8 @@ type ScopeInfo = {
 
 type SupabaseConfig = {
 	url: string;
-	anonKey: string;
-	accessToken?: string;
+	publishableKey?: string;
+	anonKey?: string;
 	enabled?: boolean;
 };
 
@@ -75,6 +75,11 @@ type RemoteLoadResult = {
 	error?: string;
 	skipped: boolean;
 };
+
+const SUPABASE_SCHEMA = "public";
+const SUPABASE_TABLE = "glossary_entry";
+const SUPABASE_TABLE_FQN = `${SUPABASE_SCHEMA}.${SUPABASE_TABLE}`;
+const SUPABASE_SELECT = "scope,term,definition,aliases,pattern,flags,source";
 
 // ── Parsing layer ─────────────────────────────────────────────────────────────
 
@@ -204,6 +209,32 @@ function resolveGlossaryFile(basePath: string): string {
 	return jsonFile;
 }
 
+function getSupabaseApiKey(supabase: SupabaseConfig): string | undefined {
+	return supabase.publishableKey?.trim() || supabase.anonKey?.trim();
+}
+
+function normalizeSupabaseProjectUrl(projectUrl: string): string {
+	return projectUrl.trim().replace(/\/+$/, "").replace(/\/rest\/v1(?:\/.*)?$/i, "");
+}
+
+function looksLikeSecretKey(apiKey: string): boolean {
+	return apiKey.startsWith("sb_secret_");
+}
+
+function buildSupabaseHeaders(apiKey: string): Record<string, string> {
+	return {
+		apikey: apiKey,
+		"Content-Type": "application/json",
+		"Accept-Profile": SUPABASE_SCHEMA,
+		"Content-Profile": SUPABASE_SCHEMA,
+	};
+}
+
+function buildSupabaseTableUrl(projectUrl: string, query?: string): string {
+	const baseUrl = normalizeSupabaseProjectUrl(projectUrl);
+	return `${baseUrl}/rest/v1/${SUPABASE_TABLE}${query ? `?${query}` : ""}`;
+}
+
 // ── Config layer ──────────────────────────────────────────────────────────────
 
 const configPath = path.join(os.homedir(), ".pi", "agent", "glossary.config.json");
@@ -269,20 +300,26 @@ async function loadRemoteEntries(supabase: SupabaseConfig, activeScopes: Set<str
 		return { entries: [], skipped: true };
 	}
 
-	if (!supabase.accessToken) {
-		return { entries: [], error: "no access token configured", skipped: false };
+	const apiKey = getSupabaseApiKey(supabase);
+	if (!apiKey) {
+		return { entries: [], error: "no publishable key configured", skipped: false };
 	}
 
-	const scopeList = Array.from(activeScopes).join(",");
-	const url = `${supabase.url}/rest/v1/glossary_entry?select=scope,term,definition,aliases,pattern,flags,source&scope=in.(${scopeList})&enabled=eq.true`;
+	const params = new URLSearchParams();
+	params.set("select", SUPABASE_SELECT);
+	params.set(
+		"scope",
+		`in.(${Array.from(activeScopes)
+			.map((scope) => JSON.stringify(scope))
+			.join(",")})`,
+	);
+	params.set("enabled", "eq.true");
+
+	const url = buildSupabaseTableUrl(supabase.url, params.toString());
 
 	try {
 		const response = await fetch(url, {
-			headers: {
-				apikey: supabase.anonKey,
-				Authorization: `Bearer ${supabase.accessToken}`,
-				"Content-Type": "application/json",
-			},
+			headers: buildSupabaseHeaders(apiKey),
 		});
 
 		if (!response.ok) {
@@ -374,8 +411,8 @@ function mergeEntries(
 
 // ── Provisioning layer ────────────────────────────────────────────────────────
 
-const PROVISIONING_SQL = `-- Create glossary_entry table
-create table if not exists glossary_entry (
+const PROVISIONING_SQL = `-- pi-glossary reads from public.glossary_entry via the Supabase REST API.
+create table if not exists public.glossary_entry (
   id uuid primary key default gen_random_uuid(),
   scope text not null,
   term text not null,
@@ -385,105 +422,50 @@ create table if not exists glossary_entry (
   flags text null,
   enabled boolean not null default true,
   source text null,
-  owner_user_id uuid not null,
-  visibility text not null default 'private',
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+
+  constraint glossary_entry_scope_nonempty check (btrim(scope) <> ''),
+  constraint glossary_entry_term_nonempty check (btrim(term) <> ''),
+  constraint glossary_entry_definition_nonempty check (btrim(definition) <> ''),
+  constraint glossary_entry_aliases_is_array check (jsonb_typeof(aliases) = 'array')
 );
 
--- Constraints
-alter table glossary_entry
-  add constraint glossary_entry_scope_nonempty check (scope <> ''),
-  add constraint glossary_entry_term_nonempty check (term <> ''),
-  add constraint glossary_entry_definition_nonempty check (definition <> '');
+create unique index if not exists glossary_entry_scope_term
+  on public.glossary_entry (scope, term);
 
--- Indexes
-create unique index if not exists glossary_entry_owner_scope_term
-  on glossary_entry (owner_user_id, scope, term);
-create index if not exists glossary_entry_owner_scope
-  on glossary_entry (owner_user_id, scope);
+create index if not exists glossary_entry_scope_enabled
+  on public.glossary_entry (scope, enabled);
 
--- Row-level security
-alter table glossary_entry enable row level security;
+grant usage on schema public to anon, authenticated;
+grant select on public.glossary_entry to anon, authenticated;
 
-drop policy if exists "users can select own rows" on glossary_entry;
-create policy "users can select own rows"
-  on glossary_entry for select
-  using (owner_user_id = auth.uid());
+alter table public.glossary_entry enable row level security;
 
-drop policy if exists "users can insert own rows" on glossary_entry;
-create policy "users can insert own rows"
-  on glossary_entry for insert
-  with check (owner_user_id = auth.uid());
+drop policy if exists "public can read enabled glossary entries" on public.glossary_entry;
+create policy "public can read enabled glossary entries"
+  on public.glossary_entry
+  for select
+  to anon, authenticated
+  using (enabled = true);`;
 
-drop policy if exists "users can update own rows" on glossary_entry;
-create policy "users can update own rows"
-  on glossary_entry for update
-  using (owner_user_id = auth.uid());
-
-drop policy if exists "users can delete own rows" on glossary_entry;
-create policy "users can delete own rows"
-  on glossary_entry for delete
-  using (owner_user_id = auth.uid());`;
-
-async function checkConnectivity(url: string, anonKey: string): Promise<{ ok: boolean; error?: string }> {
+async function checkTableExists(url: string, apiKey: string): Promise<{ exists: boolean; error?: string }> {
 	try {
-		const response = await fetch(`${url}/rest/v1/`, {
-			headers: { apikey: anonKey },
-		});
-		if (!response.ok) {
-			const text = await response.text();
-			return { ok: false, error: `HTTP ${response.status}: ${text.slice(0, 200)}` };
-		}
-		return { ok: true };
-	} catch (error) {
-		return { ok: false, error: error instanceof Error ? error.message : String(error) };
-	}
-}
-
-async function signInWithPassword(
-	url: string,
-	anonKey: string,
-	email: string,
-	password: string,
-): Promise<{ accessToken?: string; error?: string }> {
-	try {
-		const response = await fetch(`${url}/auth/v1/token?grant_type=password`, {
-			method: "POST",
-			headers: {
-				apikey: anonKey,
-				"Content-Type": "application/json",
-			},
-			body: JSON.stringify({ email, password }),
-		});
-		if (!response.ok) {
-			const data = (await response.json()) as { error_description?: string; message?: string };
-			return { error: data.error_description ?? data.message ?? `HTTP ${response.status}` };
-		}
-		const data = (await response.json()) as { access_token: string };
-		return { accessToken: data.access_token };
-	} catch (error) {
-		return { error: error instanceof Error ? error.message : String(error) };
-	}
-}
-
-async function checkTableExists(
-	url: string,
-	anonKey: string,
-	accessToken: string,
-): Promise<{ exists: boolean; error?: string }> {
-	try {
-		const response = await fetch(`${url}/rest/v1/glossary_entry?limit=0`, {
-			headers: {
-				apikey: anonKey,
-				Authorization: `Bearer ${accessToken}`,
-			},
+		const response = await fetch(buildSupabaseTableUrl(url, "select=term&limit=0"), {
+			headers: buildSupabaseHeaders(apiKey),
 		});
 		if (response.ok) return { exists: true };
-		const data = (await response.json()) as { code?: string; message?: string };
-		// PostgREST error code for undefined table
-		if (data.code === "42P01") return { exists: false };
-		return { exists: false, error: data.message ?? `HTTP ${response.status}` };
+		const text = await response.text();
+		let data: { code?: string; message?: string } | undefined;
+		try {
+			data = JSON.parse(text) as { code?: string; message?: string };
+		} catch {
+			data = undefined;
+		}
+		if (response.status === 404 || data?.code === "42P01" || data?.code === "PGRST205") {
+			return { exists: false };
+		}
+		return { exists: false, error: data?.message ?? text ?? `HTTP ${response.status}` };
 	} catch (error) {
 		return { exists: false, error: error instanceof Error ? error.message : String(error) };
 	}
@@ -721,15 +703,16 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 						return;
 					}
 
+					const apiKey = getSupabaseApiKey(sb);
 					const lines: string[] = [
 						`Supabase: ${sb.enabled ? "enabled" : "disabled"}`,
 						`URL: ${sb.url}`,
-						`Anon key: ${maskKey(sb.anonKey)}`,
-						`Access token: ${sb.accessToken ? maskKey(sb.accessToken) : "not set"}`,
+						`Schema/table: ${SUPABASE_TABLE_FQN}`,
+						`Publishable key: ${apiKey ? maskKey(apiKey) : "not set"}`,
 					];
 
 					if (remoteSkipped) {
-						lines.push("Remote load: skipped (disabled or no access token)");
+						lines.push("Remote load: skipped (disabled)");
 					} else if (remoteError) {
 						lines.push(`Remote load: failed — ${remoteError}`);
 					} else {
@@ -766,15 +749,16 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 				// ── Step 1: Connection ────────────────────────────────────────
 
 				let updateConnection = true;
+				const existingKey = existing ? getSupabaseApiKey(existing) : undefined;
 				if (existing) {
 					updateConnection = await ctx.ui.confirm(
 						"Reconfigure Supabase connection?",
-						`Current URL: ${existing.url}\nAnon key: ${maskKey(existing.anonKey)}\n\nUpdate these values?`,
+						`Current URL: ${existing.url}\nPublishable key: ${existingKey ? maskKey(existingKey) : "not set"}\nExpected table: ${SUPABASE_TABLE_FQN}\n\nUpdate these values?`,
 					);
 				}
 
 				let url = existing?.url ?? "";
-				let anonKey = existing?.anonKey ?? "";
+				let publishableKey = existingKey ?? "";
 
 				if (updateConnection) {
 					const urlInput = await ctx.ui.input(
@@ -782,122 +766,87 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 						existing?.url ?? "https://your-project.supabase.co",
 					);
 					if (urlInput === undefined) return;
-					url = urlInput.trim() || existing?.url || "";
+					url = normalizeSupabaseProjectUrl(urlInput.trim() || existing?.url || "");
 					if (!url) {
 						ctx.ui.notify("URL is required.", "error");
 						return;
 					}
 
 					const keyInput = await ctx.ui.input(
-						"Supabase anon key",
-						existing ? maskKey(existing.anonKey) : "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+						"Supabase publishable key",
+						existingKey ? maskKey(existingKey) : "sb_publishable_...",
 					);
 					if (keyInput === undefined) return;
-					// Keep existing key if user submitted empty (they saw the masked value)
-					anonKey = keyInput.trim() || existing?.anonKey || "";
-					if (!anonKey) {
-						ctx.ui.notify("Anon key is required.", "error");
+					publishableKey = keyInput.trim() || existingKey || "";
+					if (!publishableKey) {
+						ctx.ui.notify("Publishable key is required.", "error");
 						return;
 					}
 
-					// Validate connectivity
-					ctx.ui.notify("Checking connectivity...", "info");
-					const connResult = await checkConnectivity(url, anonKey);
-					if (!connResult.ok) {
-						ctx.ui.notify(`Connectivity check failed: ${connResult.error}`, "error");
-						return;
-					}
-					ctx.ui.notify("Connection OK.", "info");
 				}
 
-				// ── Step 2: Credentials ───────────────────────────────────────
-
-				let accessToken = existing?.accessToken;
-				let doSignIn = !accessToken;
-
-				if (accessToken) {
-					doSignIn = await ctx.ui.confirm(
-						"Update credentials?",
-						"An access token is already stored. Sign in again to replace it?",
-					);
-				}
-
-				if (doSignIn) {
-					const email = await ctx.ui.input("Supabase account email", "you@example.com");
-					if (email === undefined) return;
-					if (!email.trim()) {
-						ctx.ui.notify("Email is required.", "error");
-						return;
-					}
-
-					const password = await ctx.ui.input("Supabase account password (input is visible)", "");
-					if (password === undefined) return;
-					if (!password) {
-						ctx.ui.notify("Password is required.", "error");
-						return;
-					}
-
-					ctx.ui.notify("Signing in...", "info");
-					const signInResult = await signInWithPassword(url, anonKey, email.trim(), password);
-					if (signInResult.error) {
-						ctx.ui.notify(`Sign-in failed: ${signInResult.error}`, "error");
-						return;
-					}
-					accessToken = signInResult.accessToken;
-					ctx.ui.notify("Signed in.", "info");
-				}
-
-				if (!accessToken) {
-					ctx.ui.notify("No access token available. Cannot proceed.", "error");
+				if (!url || !publishableKey) {
+					ctx.ui.notify("Supabase URL and publishable key are required.", "error");
 					return;
 				}
 
-				// ── Step 3: Schema check and provisioning ─────────────────────
+				if (looksLikeSecretKey(publishableKey)) {
+					ctx.ui.notify(
+						"This looks like a Supabase secret key. Supabase docs say secret keys bypass RLS and should only be used on trusted backends. Use a publishable key here instead.",
+						"warning",
+					);
+				}
 
-				ctx.ui.notify("Checking table...", "info");
-				const tableResult = await checkTableExists(url, anonKey, accessToken);
+				ctx.ui.notify(
+					`pi-glossary reads from ${SUPABASE_TABLE_FQN} via the Supabase REST API.\n\nCopy/paste this DDL into the Supabase SQL editor:\n\n${PROVISIONING_SQL}`,
+					"info",
+				);
+
+				// ── Step 2: Schema check and provisioning ─────────────────────
+
+				ctx.ui.notify(`Checking table ${SUPABASE_TABLE_FQN}...`, "info");
+				const tableResult = await checkTableExists(url, publishableKey);
 
 				if (!tableResult.exists) {
-					const reason = tableResult.error ? ` (${tableResult.error})` : "";
+					const reason = tableResult.error ? `\n\nSupabase said: ${tableResult.error}` : "";
 					ctx.ui.notify(
-						`Table not found${reason}.\n\nRun the following SQL in the Supabase SQL editor (https://supabase.com/dashboard → SQL Editor):\n\n${PROVISIONING_SQL}`,
+						`Could not read ${SUPABASE_TABLE_FQN} with the provided key.${reason}\n\nIf you just created the table, paste the DDL above in Supabase SQL Editor, then continue. If the table already exists, verify that the key is a publishable key and that the grants/RLS policy from the DDL were applied.`,
 						"warning",
 					);
 
 					const confirmed = await ctx.ui.confirm(
 						"Schema ready?",
-						"Have you run the provisioning SQL in the Supabase SQL editor?",
+						`Have you pasted the DDL for ${SUPABASE_TABLE_FQN} into the Supabase SQL editor?`,
 					);
 					if (!confirmed) {
 						ctx.ui.notify(
-							"Setup cancelled. Run /glossary init supabase again after provisioning the schema.",
+							"Setup cancelled. Run /glossary init supabase again after provisioning the table.",
 							"info",
 						);
 						return;
 					}
 
 					ctx.ui.notify("Re-checking table...", "info");
-					const recheck = await checkTableExists(url, anonKey, accessToken);
+					const recheck = await checkTableExists(url, publishableKey);
 					if (!recheck.exists) {
 						const recheckReason = recheck.error ?? "table still not found";
 						ctx.ui.notify(
-							`Table still not accessible: ${recheckReason}\n\nVerify the SQL ran without errors, then run /glossary init supabase again.`,
+							`Table still not accessible: ${recheckReason}\n\nVerify the DDL ran without errors. For publishable keys, make sure the table has SELECT grants for anon/authenticated and the RLS policy allows reading enabled rows.`,
 							"error",
 						);
 						return;
 					}
 				}
 
-				ctx.ui.notify("Table OK.", "info");
+				ctx.ui.notify(`Table OK: ${SUPABASE_TABLE_FQN}.`, "info");
 
-				// ── Step 4: Save config and reload ────────────────────────────
+				// ── Step 3: Save config and reload ────────────────────────────
 
 				const newConfig: GlossaryConfig = {
 					...config,
 					supabase: {
-						url,
-						anonKey,
-						accessToken,
+						url: normalizeSupabaseProjectUrl(url),
+						publishableKey,
 						enabled: true,
 					},
 				};
@@ -917,7 +866,7 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 				}
 
 				ctx.ui.notify(
-					`Supabase configured.\n\nConfig saved to: ${configPath}\nRemote entries loaded: ${remoteCount}\nTotal glossary entries: ${reloadResult.count}\n\nAdd entries to your Supabase table with scope values matching your active scopes. Run /glossary scopes to see active scopes.`,
+					`Supabase configured.\n\nConfig saved to: ${configPath}\nSchema/table: ${SUPABASE_TABLE_FQN}\nRemote entries loaded: ${remoteCount}\nTotal glossary entries: ${reloadResult.count}\n\nAdd entries to ${SUPABASE_TABLE_FQN} with scope values matching your active scopes. Run /glossary scopes to see active scopes.`,
 					"info",
 				);
 				return;

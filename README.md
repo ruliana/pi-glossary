@@ -134,32 +134,34 @@ The extension stores user-level preferences in `~/.pi/agent/glossary.config.json
   "enabledScopes": ["team/core", "project/payments"],
   "supabase": {
     "url": "https://your-project.supabase.co",
-    "anonKey": "your-anon-key",
-    "accessToken": "your-user-jwt",
+    "publishableKey": "your-publishable-key",
     "enabled": true
   }
 }
 ```
 
-The `enabledScopes` field is managed automatically by the scope commands. The `supabase` section is configured manually until `/glossary init supabase` is available (Phase 3).
+The `enabledScopes` field is managed automatically by the scope commands.
 
-## Private Supabase Glossary
+## Supabase REST Glossary
 
-The extension can load glossary entries from a private Supabase project in addition to local files.
+The extension can load glossary entries from Supabase in addition to local files.
 
 ### How it works
 
 - Supabase entries are loaded for active scopes only
-- RLS policies on the `glossary_entry` table restrict visibility to the authenticated user's rows
+- The connector uses only the Supabase REST API plus a publishable key
+- No Supabase Auth session or access token is required
 - Local files load regardless of Supabase availability
 - If the Supabase connection fails, local entries remain active and a warning is shown
 
-### Table schema
+### Expected schema and table
 
-Create a `glossary_entry` table with these columns:
+The connector reads from `public.glossary_entry`.
+
+Copy/paste this DDL into the Supabase SQL editor:
 
 ```sql
-create table glossary_entry (
+create table if not exists public.glossary_entry (
   id uuid primary key default gen_random_uuid(),
   scope text not null,
   term text not null,
@@ -169,51 +171,44 @@ create table glossary_entry (
   flags text null,
   enabled boolean not null default true,
   source text null,
-  owner_user_id uuid not null,
-  visibility text not null default 'private',
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+
+  constraint glossary_entry_scope_nonempty check (btrim(scope) <> ''),
+  constraint glossary_entry_term_nonempty check (btrim(term) <> ''),
+  constraint glossary_entry_definition_nonempty check (btrim(definition) <> ''),
+  constraint glossary_entry_aliases_is_array check (jsonb_typeof(aliases) = 'array')
 );
 
--- Constraints
-alter table glossary_entry add constraint glossary_entry_scope_nonempty check (scope <> '');
-alter table glossary_entry add constraint glossary_entry_term_nonempty check (term <> '');
-alter table glossary_entry add constraint glossary_entry_definition_nonempty check (definition <> '');
+create unique index if not exists glossary_entry_scope_term
+  on public.glossary_entry (scope, term);
 
--- Indexes
-create unique index glossary_entry_owner_scope_term on glossary_entry (owner_user_id, scope, term);
-create index glossary_entry_owner_scope on glossary_entry (owner_user_id, scope);
+create index if not exists glossary_entry_scope_enabled
+  on public.glossary_entry (scope, enabled);
 
--- RLS
-alter table glossary_entry enable row level security;
+grant usage on schema public to anon, authenticated;
+grant select on public.glossary_entry to anon, authenticated;
 
-create policy "users can select own rows"
-  on glossary_entry for select
-  using (owner_user_id = auth.uid());
+alter table public.glossary_entry enable row level security;
 
-create policy "users can insert own rows"
-  on glossary_entry for insert
-  with check (owner_user_id = auth.uid());
-
-create policy "users can update own rows"
-  on glossary_entry for update
-  using (owner_user_id = auth.uid());
-
-create policy "users can delete own rows"
-  on glossary_entry for delete
-  using (owner_user_id = auth.uid());
+drop policy if exists "public can read enabled glossary entries" on public.glossary_entry;
+create policy "public can read enabled glossary entries"
+  on public.glossary_entry
+  for select
+  to anon, authenticated
+  using (enabled = true);
 ```
 
 ### Setup
 
 Run `/glossary init supabase` to walk through the full setup:
 
-1. Enter your Supabase project URL and anon key (from Project Settings → API in the Supabase dashboard)
-2. Sign in with your Supabase account email and password to obtain a session token
-3. If the `glossary_entry` table does not exist, the command shows the provisioning SQL to run in the Supabase SQL editor
-4. After confirming the schema is ready, the config is saved and the glossary reloads
+1. Enter your Supabase project URL and publishable key
+2. The command immediately shows the exact DDL for `public.glossary_entry`
+3. Paste the DDL into the Supabase SQL editor if the table or policies are missing
+4. After confirming the schema is ready and the table is readable through the REST API, the config is saved and the glossary reloads
 
-The command can be re-run at any time to update the URL, anon key, or credentials.
+The command can be re-run at any time to update the URL or publishable key.
 
 ### Manual configuration
 
@@ -223,21 +218,15 @@ You can also edit `~/.pi/agent/glossary.config.json` directly:
 {
   "supabase": {
     "url": "https://your-project.supabase.co",
-    "anonKey": "your-anon-key",
-    "accessToken": "your-user-jwt",
+    "publishableKey": "your-publishable-key",
     "enabled": true
   }
 }
 ```
 
 - **url**: Supabase project URL (Project Settings → API)
-- **anonKey**: Project anonymous key (Project Settings → API)
-- **accessToken**: User JWT from a Supabase Auth session; RLS uses this to enforce row ownership
+- **publishableKey**: Supabase publishable key (Project Settings → API). Do not use a secret key here.
 - **enabled**: Set to `false` to disable remote loading without removing the config
-
-### Access token expiry
-
-Supabase JWTs expire after one hour by default. When the token expires, `/glossary supabase status` shows the auth error, and `/glossary init supabase` can re-sign you in without reconfiguring the URL or anon key.
 
 ### Troubleshooting
 
@@ -245,7 +234,8 @@ Run `/glossary supabase status` to see:
 
 - whether Supabase is configured and enabled
 - the configured URL
-- whether an access token is present
+- the expected schema/table (`public.glossary_entry`)
+- whether a publishable key is present
 - the result of the last remote load attempt
 
 ## Glossary Entry Fields
@@ -295,7 +285,7 @@ Only entries whose scopes overlap with the active scopes are eligible for matchi
 | `/glossary scope enable <scope>` | Enable a scope and persist it in user config |
 | `/glossary scope disable <scope>` | Disable a scope and remove it from user config |
 | `/glossary supabase status` | Show Supabase connection state and last remote load result |
-| `/glossary init supabase` | Interactive setup: configure connection, sign in, and provision schema |
+| `/glossary init supabase` | Interactive setup: configure REST access, show the DDL, and validate the schema |
 
 ## Notes
 
