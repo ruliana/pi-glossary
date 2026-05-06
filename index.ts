@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { CustomEditor } from "@mariozechner/pi-coding-agent";
-import { matchesKey, Key, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
+import { CURSOR_MARKER, matchesKey, Key, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
 import type { Component, EditorTheme, TUI } from "@mariozechner/pi-tui";
 
 type GlossaryEntry = {
@@ -105,33 +105,25 @@ function highlightTermsInAnsiLine(
 	return result + line.slice(lastAnsi);
 }
 
-/** Custom editor that highlights glossary term matches in the input field as the user types. */
-class GlossaryHighlightEditor extends CustomEditor {
-	private activeMatchers: RegExp[] = [];
-
-	constructor(
-		tui: TUI,
-		theme: EditorTheme,
-		keybindings: any,
-		private readonly getEntries: () => CompiledEntry[],
-		private readonly fullTheme: any,
-	) {
-		super(tui, theme, keybindings);
-		this.onChange = (text) => this.updateActiveMatchers(text);
-	}
-
-	private updateActiveMatchers(text: string): void {
-		this.activeMatchers = this.getEntries()
-			.filter((e) => e.matcher.test(text))
-			.map((e) => new RegExp(e.matcher.source, e.matcher.flags.replace("g", "") + "g"));
-	}
-
-	render(width: number): string[] {
-		const lines = super.render(width);
-		if (this.activeMatchers.length === 0) return lines;
-		const hl = (s: string) => this.fullTheme.fg("accent", this.fullTheme.bold(s));
-		return lines.map((line) => highlightTermsInAnsiLine(line, this.activeMatchers, hl));
-	}
+/**
+ * Wrap an editor with overridden methods using a Proxy-based decorator.
+ * Override functions close over `inner` (no `this` gymnastics).
+ * Property writes (e.g. host's `editor.onChange = bashModeDetector`) forward to `inner`.
+ */
+function withDecorations<T extends object>(inner: T, overrides: Partial<T>): T {
+	return new Proxy(inner, {
+		get(target, prop) {
+			if (prop in overrides) return (overrides as any)[prop];
+			const v = Reflect.get(target, prop, target);
+			return typeof v === "function" ? v.bind(target) : v;
+		},
+		set(target, prop, value) {
+			return Reflect.set(target, prop, value, target);
+		},
+		has(target, prop) {
+			return prop in overrides || prop in target;
+		},
+	});
 }
 
 function buildMatcher(entry: GlossaryEntry): RegExp {
@@ -617,13 +609,60 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 			);
 		}
 
-		if (ctx.hasUI) {
-			const fullTheme = ctx.ui.theme;
-			ctx.ui.setEditorComponent(
-				(tui, editorTheme, keybindings) =>
-					new GlossaryHighlightEditor(tui, editorTheme, keybindings, () => entries, fullTheme),
-			);
-		}
+		if (!ctx.hasUI) return;
+
+		const fullTheme = ctx.ui.theme;
+		const prevFactory = ctx.ui.getEditorComponent();
+
+		ctx.ui.setEditorComponent((tui, theme, kb) => {
+			const inner = prevFactory
+				? prevFactory(tui, theme, kb)
+				: new CustomEditor(tui, theme, kb);
+
+			let activeMatchers: RegExp[] = [];
+			const updateMatchers = (text: string) => {
+				activeMatchers = entries
+					.filter((e) => e.matcher.test(text))
+					.map((e) => new RegExp(e.matcher.source, e.matcher.flags.replace("g", "") + "g"));
+			};
+
+			return withDecorations(inner, {
+				handleInput(data: string): void {
+					inner.handleInput(data);
+					updateMatchers(inner.getText());
+				},
+				render(width: number): string[] {
+					const lines = inner.render(width);
+					if (activeMatchers.length === 0) return lines;
+					const hl = (s: string) => fullTheme.fg("accent", fullTheme.bold(s));
+					return lines.map((line) => {
+						// CURSOR_MARKER is an APC sequence (`\x1b_pi:c\x07`). The local
+						// ANSI parser only handles CSI, so the marker leaks into the
+						// plain-text view used for matching. When a regex match (e.g.
+						// the `grill` glossary pattern that captures word boundaries)
+						// extends past the cursor position, the byte-range slice cuts
+						// the marker mid-sequence and the terminal renders `pi:c` as
+						// visible text. Split around the marker, highlight each side,
+						// then rejoin so the marker stays intact for TUI to strip.
+						const markerIdx = line.indexOf(CURSOR_MARKER);
+						if (markerIdx === -1) {
+							return highlightTermsInAnsiLine(line, activeMatchers, hl);
+						}
+						const before = line.slice(0, markerIdx);
+						const after = line.slice(markerIdx + CURSOR_MARKER.length);
+						return (
+							highlightTermsInAnsiLine(before, activeMatchers, hl) +
+							CURSOR_MARKER +
+							highlightTermsInAnsiLine(after, activeMatchers, hl)
+						);
+					});
+				},
+				setText(text: string): void {
+					inner.setText(text);
+					updateMatchers(text);
+				},
+			});
+		});
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
