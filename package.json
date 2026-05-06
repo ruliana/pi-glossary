@@ -22,11 +22,15 @@
   ],
   "files": [
     "index.ts",
-    "README.md"
+    "README.md",
+    "skills"
   ],
   "pi": {
     "extensions": [
       "./index.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "peerDependencies": {

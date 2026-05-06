@@ -153,6 +153,7 @@ The extension can load glossary entries from Supabase in addition to local files
 - No Supabase Auth session or access token is required
 - Local files load regardless of Supabase availability
 - If the Supabase connection fails, local entries remain active and a warning is shown
+- `/glossary entry ...` defaults to local CRUD, and prompts for local vs Supabase when Supabase is configured
 
 ### Expected schema and table
 
@@ -161,6 +162,9 @@ The connector reads from `public.glossary_entry`.
 Copy/paste this DDL into the Supabase SQL editor:
 
 ```sql
+-- pi-glossary reads and writes public.glossary_entry via the Supabase REST API.
+-- WARNING: with a publishable key and no user JWT, writes run as the anon role.
+-- The grants and policies below allow create/update/delete through the REST API.
 create table if not exists public.glossary_entry (
   id uuid primary key default gen_random_uuid(),
   scope text not null,
@@ -187,16 +191,38 @@ create index if not exists glossary_entry_scope_enabled
   on public.glossary_entry (scope, enabled);
 
 grant usage on schema public to anon, authenticated;
-grant select on public.glossary_entry to anon, authenticated;
+grant select, insert, update, delete on public.glossary_entry to anon, authenticated;
 
 alter table public.glossary_entry enable row level security;
 
-drop policy if exists "public can read enabled glossary entries" on public.glossary_entry;
-create policy "public can read enabled glossary entries"
+drop policy if exists "public can read glossary entries" on public.glossary_entry;
+create policy "public can read glossary entries"
   on public.glossary_entry
   for select
   to anon, authenticated
-  using (enabled = true);
+  using (true);
+
+drop policy if exists "public can insert glossary entries" on public.glossary_entry;
+create policy "public can insert glossary entries"
+  on public.glossary_entry
+  for insert
+  to anon, authenticated
+  with check (true);
+
+drop policy if exists "public can update glossary entries" on public.glossary_entry;
+create policy "public can update glossary entries"
+  on public.glossary_entry
+  for update
+  to anon, authenticated
+  using (true)
+  with check (true);
+
+drop policy if exists "public can delete glossary entries" on public.glossary_entry;
+create policy "public can delete glossary entries"
+  on public.glossary_entry
+  for delete
+  to anon, authenticated
+  using (true);
 ```
 
 ### Setup
@@ -207,6 +233,8 @@ Run `/glossary init supabase` to walk through the full setup:
 2. The command immediately shows the exact DDL for `public.glossary_entry`
 3. Paste the DDL into the Supabase SQL editor if the table or policies are missing
 4. After confirming the schema is ready and the table is readable through the REST API, the config is saved and the glossary reloads
+
+If you plan to use remote CRUD with `/glossary entry ...`, keep the write grants and policies from the DDL above. If you want read-only remote access, remove the insert/update/delete grants and policies and use local CRUD instead.
 
 The command can be re-run at any time to update the URL or publishable key.
 
@@ -286,6 +314,13 @@ Only entries whose scopes overlap with the active scopes are eligible for matchi
 | `/glossary scope disable <scope>` | Disable a scope and remove it from user config |
 | `/glossary supabase status` | Show Supabase connection state and last remote load result |
 | `/glossary init supabase` | Interactive setup: configure REST access, show the DDL, and validate the schema |
+| `/glossary entry create [term]` | Interactive create flow for term, scope, definition, aliases, pattern, flags, source, and enabled |
+| `/glossary entry get [term]` | Show local or Supabase entries, including scope and remote row metadata |
+| `/glossary entry update [term]` | Interactive update flow for term, scope, definition, aliases, pattern, flags, source, and enabled |
+| `/glossary entry delete [term]` | Delete a local or Supabase entry after confirmation |
+| `/glossary entry list` | List local or Supabase entries, optionally filtered by scope |
+
+The package also ships a skill, `pi-glossary-crud`, for agents that should prefer these commands when managing glossary entries. The interactive CRUD flow always asks for scope because scope is a first-class field in the glossary model.
 
 ## Notes
 
