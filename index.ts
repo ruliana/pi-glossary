@@ -160,8 +160,8 @@ class GlossaryOverlay implements Component {
 		const leftWidth = Math.max(10, Math.floor(innerWidth * 0.38));
 		const rightWidth = Math.max(10, innerWidth - leftWidth);
 
-		// Fixed content height: use the number of entries (capped) so the box never resizes
-		const CONTENT_ROWS = Math.max(this.entries.length, 3);
+		// Content height: 75% of terminal height minus the 4 fixed rows (top border, search, separator, bottom border)
+		const CONTENT_ROWS = Math.max(3, Math.floor((this.tui.height - 4) * 0.75));
 
 		const fg = (c: string, t: string) => this.theme.fg(c, t);
 		const lines: string[] = [];
