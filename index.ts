@@ -27,6 +27,26 @@ function termToPattern(term: string): string {
 	return escapeRegExp(term.trim()).replace(/\s+/g, "\\s+");
 }
 
+/** Highlight all case-insensitive occurrences of query in text using highlightFn. */
+function highlightMatches(text: string, query: string, highlightFn: (s: string) => string): string {
+	if (!query) return text;
+	const lower = text.toLowerCase();
+	const queryLower = query.toLowerCase();
+	let result = "";
+	let pos = 0;
+	while (pos < text.length) {
+		const idx = lower.indexOf(queryLower, pos);
+		if (idx === -1) {
+			result += text.slice(pos);
+			break;
+		}
+		result += text.slice(pos, idx);
+		result += highlightFn(text.slice(idx, idx + query.length));
+		pos = idx + query.length;
+	}
+	return result;
+}
+
 function buildMatcher(entry: GlossaryEntry): RegExp {
 	if (entry.pattern) {
 		return new RegExp(entry.pattern, entry.flags ?? "iu");
@@ -99,8 +119,13 @@ class GlossaryOverlay implements Component {
 			const entry = this.filtered[i]!;
 			const isSelected = i === this.selectedIndex;
 			const prefix = isSelected ? "▶ " : "  ";
+			const highlight = (s: string) => this.theme.fg("accent", this.theme.bold(s));
 			const termText = isSelected
-				? this.theme.fg("accent", this.theme.bold(entry.term))
+				? this.theme.fg("accent", this.theme.bold(
+					this.query ? highlightMatches(entry.term, this.query, (s) => `\x1b[4m${s}\x1b[24m`) : entry.term,
+				  ))
+				: this.query
+				? highlightMatches(entry.term, this.query, highlight)
 				: entry.term;
 			const line = truncateToWidth(prefix + termText, width);
 			const fullLine = line + " ".repeat(Math.max(0, width - visibleWidth(line)));
@@ -143,7 +168,11 @@ class GlossaryOverlay implements Component {
 		}
 
 		// Definition
-		lines.push(...wrapTextWithAnsi(" " + entry.definition.trim(), width));
+		const highlight = (s: string) => this.theme.fg("accent", this.theme.bold(s));
+		const defText = this.query
+			? highlightMatches(entry.definition.trim(), this.query, highlight)
+			: entry.definition.trim();
+		lines.push(...wrapTextWithAnsi(" " + defText, width));
 
 		return lines;
 	}
