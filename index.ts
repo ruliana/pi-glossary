@@ -148,14 +148,20 @@ class GlossaryOverlay implements Component {
 		return lines;
 	}
 
-	/** Render overlay: borders + search row + content rows side by side. */
+	/** Render overlay: borders + search row + fixed-height content rows side by side. */
 	render(width: number): string[] {
 		if (this.cachedLines !== undefined && this.cachedWidth === width) {
 			return this.cachedLines;
 		}
 
-		const leftWidth = Math.max(10, Math.floor(width * 0.38));
-		const rightWidth = Math.max(10, width - leftWidth - 1); // -1 for center separator
+		// Each row is: │ + leftWidth + │ + rightWidth + │ = leftWidth + rightWidth + 3
+		// So content columns available = width - 3, split 38/62
+		const innerWidth = width - 3; // subtract 3 border chars (left │, center │, right │)
+		const leftWidth = Math.max(10, Math.floor(innerWidth * 0.38));
+		const rightWidth = Math.max(10, innerWidth - leftWidth);
+
+		// Fixed content height: use the number of entries (capped) so the box never resizes
+		const CONTENT_ROWS = Math.max(this.entries.length, 3);
 
 		const fg = (c: string, t: string) => this.theme.fg(c, t);
 		const lines: string[] = [];
@@ -164,8 +170,7 @@ class GlossaryOverlay implements Component {
 		lines.push(fg("border", "┌" + "─".repeat(leftWidth) + "┬" + "─".repeat(rightWidth) + "┐"));
 
 		// Search row
-		const cursorVisible = this.query.length === 0;
-		const searchRaw = " Search: " + this.query + (cursorVisible ? fg("muted", "█") : "█");
+		const searchRaw = " Search: " + this.query + (this.query.length === 0 ? fg("muted", "█") : "█");
 		const searchLine = truncateToWidth(searchRaw, leftWidth);
 		const searchPadded = searchLine + " ".repeat(Math.max(0, leftWidth - visibleWidth(searchLine)));
 
@@ -178,12 +183,11 @@ class GlossaryOverlay implements Component {
 		// Mid separator
 		lines.push(fg("border", "├" + "─".repeat(leftWidth) + "┼" + "─".repeat(rightWidth) + "┤"));
 
-		// Content: zip left + right panel lines
+		// Content: zip left + right panel lines, padded to CONTENT_ROWS
 		const leftLines = this.buildLeftPanel(leftWidth);
 		const rightLines = this.buildRightPanel(rightWidth);
-		const rowCount = Math.max(leftLines.length, rightLines.length);
 
-		for (let i = 0; i < rowCount; i++) {
+		for (let i = 0; i < CONTENT_ROWS; i++) {
 			const lRaw = leftLines[i] ?? "";
 			const rRaw = rightLines[i] ?? "";
 			const lPad = lRaw + " ".repeat(Math.max(0, leftWidth - visibleWidth(lRaw)));
