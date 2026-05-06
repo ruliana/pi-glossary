@@ -2,8 +2,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { matchesKey, Key, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
-import type { Component } from "@mariozechner/pi-tui";
+import { CustomEditor } from "@mariozechner/pi-coding-agent";
+import { CURSOR_MARKER, matchesKey, Key, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
+import type { Component, EditorTheme, TUI } from "@mariozechner/pi-tui";
 
 type GlossaryEntry = {
 	term: string;
@@ -25,6 +26,104 @@ function escapeRegExp(value: string): string {
 
 function termToPattern(term: string): string {
 	return escapeRegExp(term.trim()).replace(/\s+/g, "\\s+");
+}
+
+/** Highlight all case-insensitive occurrences of query in text using highlightFn. */
+function highlightMatches(text: string, query: string, highlightFn: (s: string) => string): string {
+	if (!query) return text;
+	const lower = text.toLowerCase();
+	const queryLower = query.toLowerCase();
+	let result = "";
+	let pos = 0;
+	while (pos < text.length) {
+		const idx = lower.indexOf(queryLower, pos);
+		if (idx === -1) {
+			result += text.slice(pos);
+			break;
+		}
+		result += text.slice(pos, idx);
+		result += highlightFn(text.slice(idx, idx + query.length));
+		pos = idx + query.length;
+	}
+	return result;
+}
+
+/**
+ * Highlight glossary term matches in an ANSI-encoded terminal line.
+ * Skips ANSI escape sequences when searching so cursor/color codes don't break matching.
+ */
+function highlightTermsInAnsiLine(
+	line: string,
+	matchers: RegExp[],
+	highlightFn: (s: string) => string,
+): string {
+	// Build map: plain-text character index → ANSI-string index
+	const posMap: number[] = [];
+	let i = 0;
+	while (i < line.length) {
+		if (line[i] === "\x1b") {
+			i++;
+			// Skip parameter bytes, then consume the final byte (letter)
+			while (i < line.length && (line.charCodeAt(i) < 0x40 || line.charCodeAt(i) > 0x7e)) i++;
+			i++;
+		} else {
+			posMap.push(i);
+			i++;
+		}
+	}
+	const plain = posMap.map((idx) => line[idx]).join("");
+
+	const ranges: Array<{ start: number; end: number }> = [];
+	for (const matcher of matchers) {
+		matcher.lastIndex = 0;
+		let m: RegExpExecArray | null;
+		while ((m = matcher.exec(plain)) !== null) {
+			if (m[0].length === 0) { matcher.lastIndex++; continue; }
+			ranges.push({ start: m.index, end: m.index + m[0].length });
+		}
+	}
+	if (ranges.length === 0) return line;
+
+	ranges.sort((a, b) => a.start - b.start);
+	const merged: Array<{ start: number; end: number }> = [];
+	for (const r of ranges) {
+		const last = merged[merged.length - 1];
+		if (last && r.start < last.end) last.end = Math.max(last.end, r.end);
+		else merged.push({ ...r });
+	}
+
+	let result = "";
+	let lastAnsi = 0;
+	for (const { start, end } of merged) {
+		if (start >= posMap.length) continue;
+		const ansiStart = posMap[start]!;
+		const ansiEnd = end < posMap.length ? posMap[end]! : line.length;
+		result += line.slice(lastAnsi, ansiStart);
+		result += highlightFn(line.slice(ansiStart, ansiEnd));
+		lastAnsi = ansiEnd;
+	}
+	return result + line.slice(lastAnsi);
+}
+
+/**
+ * Wrap an editor with overridden methods using a Proxy-based decorator.
+ * Override functions close over `inner` (no `this` gymnastics).
+ * Property writes (e.g. host's `editor.onChange = bashModeDetector`) forward to `inner`.
+ */
+function withDecorations<T extends object>(inner: T, overrides: Partial<T>): T {
+	return new Proxy(inner, {
+		get(target, prop) {
+			if (prop in overrides) return (overrides as any)[prop];
+			const v = Reflect.get(target, prop, target);
+			return typeof v === "function" ? v.bind(target) : v;
+		},
+		set(target, prop, value) {
+			return Reflect.set(target, prop, value, target);
+		},
+		has(target, prop) {
+			return prop in overrides || prop in target;
+		},
+	});
 }
 
 function buildMatcher(entry: GlossaryEntry): RegExp {
@@ -99,8 +198,13 @@ class GlossaryOverlay implements Component {
 			const entry = this.filtered[i]!;
 			const isSelected = i === this.selectedIndex;
 			const prefix = isSelected ? "▶ " : "  ";
+			const highlight = (s: string) => this.theme.fg("accent", this.theme.bold(s));
 			const termText = isSelected
-				? this.theme.fg("accent", this.theme.bold(entry.term))
+				? this.theme.fg("accent", this.theme.bold(
+					this.query ? highlightMatches(entry.term, this.query, (s) => `\x1b[4m${s}\x1b[24m`) : entry.term,
+				  ))
+				: this.query
+				? highlightMatches(entry.term, this.query, highlight)
 				: entry.term;
 			const line = truncateToWidth(prefix + termText, width);
 			const fullLine = line + " ".repeat(Math.max(0, width - visibleWidth(line)));
@@ -143,7 +247,11 @@ class GlossaryOverlay implements Component {
 		}
 
 		// Definition
-		lines.push(...wrapTextWithAnsi(" " + entry.definition.trim(), width));
+		const highlight = (s: string) => this.theme.fg("accent", this.theme.bold(s));
+		const defText = this.query
+			? highlightMatches(entry.definition.trim(), this.query, highlight)
+			: entry.definition.trim();
+		lines.push(...wrapTextWithAnsi(" " + defText, width));
 
 		return lines;
 	}
@@ -500,6 +608,61 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 				"info",
 			);
 		}
+
+		if (!ctx.hasUI) return;
+
+		const fullTheme = ctx.ui.theme;
+		const prevFactory = ctx.ui.getEditorComponent();
+
+		ctx.ui.setEditorComponent((tui, theme, kb) => {
+			const inner = prevFactory
+				? prevFactory(tui, theme, kb)
+				: new CustomEditor(tui, theme, kb);
+
+			let activeMatchers: RegExp[] = [];
+			const updateMatchers = (text: string) => {
+				activeMatchers = entries
+					.filter((e) => e.matcher.test(text))
+					.map((e) => new RegExp(e.matcher.source, e.matcher.flags.replace("g", "") + "g"));
+			};
+
+			return withDecorations(inner, {
+				handleInput(data: string): void {
+					inner.handleInput(data);
+					updateMatchers(inner.getText());
+				},
+				render(width: number): string[] {
+					const lines = inner.render(width);
+					if (activeMatchers.length === 0) return lines;
+					const hl = (s: string) => fullTheme.fg("accent", fullTheme.bold(s));
+					return lines.map((line) => {
+						// CURSOR_MARKER is an APC sequence (`\x1b_pi:c\x07`). The local
+						// ANSI parser only handles CSI, so the marker leaks into the
+						// plain-text view used for matching. When a regex match (e.g.
+						// the `grill` glossary pattern that captures word boundaries)
+						// extends past the cursor position, the byte-range slice cuts
+						// the marker mid-sequence and the terminal renders `pi:c` as
+						// visible text. Split around the marker, highlight each side,
+						// then rejoin so the marker stays intact for TUI to strip.
+						const markerIdx = line.indexOf(CURSOR_MARKER);
+						if (markerIdx === -1) {
+							return highlightTermsInAnsiLine(line, activeMatchers, hl);
+						}
+						const before = line.slice(0, markerIdx);
+						const after = line.slice(markerIdx + CURSOR_MARKER.length);
+						return (
+							highlightTermsInAnsiLine(before, activeMatchers, hl) +
+							CURSOR_MARKER +
+							highlightTermsInAnsiLine(after, activeMatchers, hl)
+						);
+					});
+				},
+				setText(text: string): void {
+					inner.setText(text);
+					updateMatchers(text);
+				},
+			});
+		});
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {
