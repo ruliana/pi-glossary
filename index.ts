@@ -2,8 +2,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { CustomEditor } from "@mariozechner/pi-coding-agent";
 import { matchesKey, Key, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
-import type { Component } from "@mariozechner/pi-tui";
+import type { Component, EditorTheme, TUI } from "@mariozechner/pi-tui";
 
 type GlossaryEntry = {
 	term: string;
@@ -45,6 +46,92 @@ function highlightMatches(text: string, query: string, highlightFn: (s: string) 
 		pos = idx + query.length;
 	}
 	return result;
+}
+
+/**
+ * Highlight glossary term matches in an ANSI-encoded terminal line.
+ * Skips ANSI escape sequences when searching so cursor/color codes don't break matching.
+ */
+function highlightTermsInAnsiLine(
+	line: string,
+	matchers: RegExp[],
+	highlightFn: (s: string) => string,
+): string {
+	// Build map: plain-text character index → ANSI-string index
+	const posMap: number[] = [];
+	let i = 0;
+	while (i < line.length) {
+		if (line[i] === "\x1b") {
+			i++;
+			// Skip parameter bytes, then consume the final byte (letter)
+			while (i < line.length && (line.charCodeAt(i) < 0x40 || line.charCodeAt(i) > 0x7e)) i++;
+			i++;
+		} else {
+			posMap.push(i);
+			i++;
+		}
+	}
+	const plain = posMap.map((idx) => line[idx]).join("");
+
+	const ranges: Array<{ start: number; end: number }> = [];
+	for (const matcher of matchers) {
+		matcher.lastIndex = 0;
+		let m: RegExpExecArray | null;
+		while ((m = matcher.exec(plain)) !== null) {
+			if (m[0].length === 0) { matcher.lastIndex++; continue; }
+			ranges.push({ start: m.index, end: m.index + m[0].length });
+		}
+	}
+	if (ranges.length === 0) return line;
+
+	ranges.sort((a, b) => a.start - b.start);
+	const merged: Array<{ start: number; end: number }> = [];
+	for (const r of ranges) {
+		const last = merged[merged.length - 1];
+		if (last && r.start < last.end) last.end = Math.max(last.end, r.end);
+		else merged.push({ ...r });
+	}
+
+	let result = "";
+	let lastAnsi = 0;
+	for (const { start, end } of merged) {
+		if (start >= posMap.length) continue;
+		const ansiStart = posMap[start]!;
+		const ansiEnd = end < posMap.length ? posMap[end]! : line.length;
+		result += line.slice(lastAnsi, ansiStart);
+		result += highlightFn(line.slice(ansiStart, ansiEnd));
+		lastAnsi = ansiEnd;
+	}
+	return result + line.slice(lastAnsi);
+}
+
+/** Custom editor that highlights glossary term matches in the input field as the user types. */
+class GlossaryHighlightEditor extends CustomEditor {
+	private activeMatchers: RegExp[] = [];
+
+	constructor(
+		tui: TUI,
+		theme: EditorTheme,
+		keybindings: any,
+		private readonly getEntries: () => CompiledEntry[],
+		private readonly fullTheme: any,
+	) {
+		super(tui, theme, keybindings);
+		this.onChange = (text) => this.updateActiveMatchers(text);
+	}
+
+	private updateActiveMatchers(text: string): void {
+		this.activeMatchers = this.getEntries()
+			.filter((e) => e.matcher.test(text))
+			.map((e) => new RegExp(e.matcher.source, e.matcher.flags.replace("g", "") + "g"));
+	}
+
+	render(width: number): string[] {
+		const lines = super.render(width);
+		if (this.activeMatchers.length === 0) return lines;
+		const hl = (s: string) => this.fullTheme.fg("accent", this.fullTheme.bold(s));
+		return lines.map((line) => highlightTermsInAnsiLine(line, this.activeMatchers, hl));
+	}
 }
 
 function buildMatcher(entry: GlossaryEntry): RegExp {
@@ -527,6 +614,14 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 			ctx.ui.notify(
 				`Glossary loaded: ${result.count} entr${result.count === 1 ? "y" : "ies"}${summarizeGlossarySources(result.files)}`,
 				"info",
+			);
+		}
+
+		if (ctx.hasUI) {
+			const fullTheme = ctx.ui.theme;
+			ctx.ui.setEditorComponent(
+				(tui, editorTheme, keybindings) =>
+					new GlossaryHighlightEditor(tui, editorTheme, keybindings, () => entries, fullTheme),
 			);
 		}
 	});
