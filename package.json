@@ -1,6 +1,6 @@
 {
   "name": "pi-glossary",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Pi extension that lazy-loads glossary definitions into the system prompt when prompts mention matching terms",
   "author": "Ronie",
   "license": "MIT",
@@ -34,6 +34,7 @@
     ]
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*"
+    "@mariozechner/pi-coding-agent": "*",
+    "@sinclair/typebox": "*"
   }
 }

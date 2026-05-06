@@ -1,6 +1,10 @@
 [
   {
     "term": "pi-glossary",
-    "definition": "pi-glossary is a Pi extension that lazy-loads glossary definitions into the agent context when user prompts mention matching terms. It reads global glossary entries from ~/.pi/agent/glossary.json and project-specific entries from .pi/glossary.json."
+    "definition": "pi-glossary is a Pi extension that lazy-loads glossary definitions into the agent context when user prompts mention matching terms. It reads global glossary entries from ~/.pi/agent/glossary.json and project-specific entries from .pi/glossary.json. See [[pi-glossary schema]] when adding or modifying glossary entries."
+  },
+  {
+    "term": "pi-glossary schema",
+    "definition": "Entry schema for glossary.json: each entry is an object with required `term` (non-empty string canonical handle) and `definition` (non-empty string injected when matched). Optional fields are `aliases` (array of strings), `pattern` (custom regex trigger that overrides term and aliases matching), `flags` (regex flags, defaults to `iu`), `enabled` (boolean; set false to disable), and `source` (provenance label included with injected context). JSON Schema-style shape: `{ \"type\": \"object\", \"required\": [\"term\", \"definition\"], \"properties\": { \"term\": { \"type\": \"string\", \"minLength\": 1 }, \"definition\": { \"type\": \"string\", \"minLength\": 1 }, \"aliases\": { \"type\": \"array\", \"items\": { \"type\": \"string\" } }, \"pattern\": { \"type\": \"string\" }, \"flags\": { \"type\": \"string\", \"default\": \"iu\" }, \"enabled\": { \"type\": \"boolean\" }, \"source\": { \"type\": \"string\" } } }`."
   }
 ]

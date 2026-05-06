@@ -5,6 +5,7 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { CustomEditor } from "@mariozechner/pi-coding-agent";
 import { CURSOR_MARKER, matchesKey, Key, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
 import type { Component, EditorTheme, TUI } from "@mariozechner/pi-tui";
+import { Type } from "@sinclair/typebox";
 
 type GlossaryEntry = {
 	term: string;
@@ -139,10 +140,21 @@ function buildMatcher(entry: GlossaryEntry): RegExp {
 	return new RegExp(`(?<![\\p{L}\\p{N}_])(?:${variants.join("|")})(?![\\p{L}\\p{N}_])`, entry.flags ?? "iu");
 }
 
+function matchesText(matcher: RegExp, text: string): boolean {
+	matcher.lastIndex = 0;
+	const matched = matcher.test(text);
+	matcher.lastIndex = 0;
+	return matched;
+}
+
 function formatEntry(entry: CompiledEntry): string {
 	const aliases = entry.aliases?.length ? `Aliases: ${entry.aliases.join(", ")}\n` : "";
 	const source = entry.source ? `Source: ${entry.source}\n` : "";
 	return `### \`${entry.term}\`\n${aliases}${source}${entry.definition.trim()}`.trim();
+}
+
+function extractRefs(definition: string): string[] {
+	return [...definition.matchAll(/\[\[([^\]]+)\]\]/g)].map((m) => m[1]!.trim());
 }
 
 /**
@@ -449,6 +461,7 @@ function resolveGlossaryFile(basePath: string): string {
 
 export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 	let entries: CompiledEntry[] = [];
+	let termMap: Map<string, CompiledEntry> = new Map();
 	let loadError: string | undefined;
 	let loadedTermsForSession = new Set<string>();
 
@@ -485,6 +498,7 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 
 	const loadGlossary = (cwd: string) => {
 		entries = [];
+		termMap = new Map();
 		loadError = undefined;
 
 		try {
@@ -513,6 +527,8 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 					);
 				}
 			});
+
+			termMap = new Map(entries.map((e) => [e.term.toLowerCase(), e]));
 
 			const foundFiles = [globalResult, projectResult]
 				.filter((result) => result.found)
@@ -594,6 +610,36 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerTool({
+		name: "glossary_lookup",
+		label: "Glossary lookup",
+		description:
+			"Look up a glossary term by name and get its definition. " +
+			"Use this when a loaded definition contains a [[term-name]] cross-reference that is relevant to the current task.",
+		parameters: Type.Object({
+			term: Type.String({ description: "The term name to look up (case-insensitive)" }),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const key = params.term.trim().toLowerCase();
+			const entry = termMap.get(key);
+
+			if (!entry) {
+				return {
+					content: [{ type: "text" as const, text: `Glossary term not found: "${params.term}"` }],
+				};
+			}
+
+			if (!loadedTermsForSession.has(entry.term)) {
+				appendLoadedTerms([entry.term]);
+				updateGlossaryWidget(ctx);
+			}
+
+			return {
+				content: [{ type: "text" as const, text: formatEntry(entry) }],
+			};
+		},
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		loadedTermsForSession = new Set<string>();
 		updateGlossaryWidget(ctx);
@@ -622,7 +668,7 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 			let activeMatchers: RegExp[] = [];
 			const updateMatchers = (text: string) => {
 				activeMatchers = entries
-					.filter((e) => e.matcher.test(text))
+					.filter((e) => matchesText(e.matcher, text))
 					.map((e) => new RegExp(e.matcher.source, e.matcher.flags.replace("g", "") + "g"));
 			};
 
@@ -675,8 +721,9 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 			return;
 		}
 
-		const matched = entries.filter((entry) => entry.matcher.test(prompt));
-		const newlyMatched = matched.filter((entry) => !loadedTermsForSession.has(entry.term));
+		const newlyMatched = entries.filter(
+			(entry) => !loadedTermsForSession.has(entry.term) && matchesText(entry.matcher, prompt),
+		);
 
 		if (newlyMatched.length === 0) {
 			return;
@@ -687,8 +734,13 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 
 		const injectedGlossary = newlyMatched.map(formatEntry).join("\n\n");
 
+		const hasRefs = newlyMatched.some((entry) => extractRefs(entry.definition).length > 0);
+		const refHint = hasRefs
+			? "\n\nSome definitions above contain `[[term-name]]` cross-references to related glossary terms. Use the `glossary_lookup` tool to retrieve a referenced term's definition if it is relevant to the current task."
+			: "";
+
 		return {
-			systemPrompt: `${event.systemPrompt}\n\n## Lazy-Loaded Agent Glossary\nThe user's prompt referenced explicit project glossary handles. Treat the following definitions as authoritative for this turn. Reuse them exactly as project-local language, and do not ask the user to restate them unless the definitions conflict or are ambiguous.\n\n${injectedGlossary}`,
+			systemPrompt: `${event.systemPrompt}\n\n## Glossary\nThe user's prompt referenced explicit project glossary handles. Treat the following definitions as authoritative for this turn. Reuse them exactly as project-local language, and do not ask the user to restate them unless the definitions conflict or are ambiguous.\n\n${injectedGlossary}${refHint}`,
 		};
 	});
 
