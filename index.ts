@@ -160,8 +160,8 @@ class GlossaryOverlay implements Component {
 		const leftWidth = Math.max(10, Math.floor(innerWidth * 0.38));
 		const rightWidth = Math.max(10, innerWidth - leftWidth);
 
-		// Content height: 75% of terminal height minus the 4 fixed rows (top border, search, separator, bottom border)
-		const CONTENT_ROWS = Math.max(3, Math.floor((this.tui.height - 4) * 0.75));
+		// Render enough rows; the overlay system clips to maxHeight: "75%" automatically.
+		const CONTENT_ROWS = Math.max(this.entries.length, 20);
 
 		const fg = (c: string, t: string) => this.theme.fg(c, t);
 		const lines: string[] = [];
@@ -478,7 +478,7 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 					overlay: true,
 					overlayOptions: {
 						width: "90%",
-						maxHeight: "80%",
+						maxHeight: "75%",
 						anchor: "center",
 					},
 				},
