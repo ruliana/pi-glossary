@@ -2,6 +2,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { matchesKey, Key, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
+import type { Component } from "@mariozechner/pi-tui";
 
 type GlossaryEntry = {
 	term: string;
@@ -42,6 +44,210 @@ function formatEntry(entry: CompiledEntry): string {
 	const aliases = entry.aliases?.length ? `Aliases: ${entry.aliases.join(", ")}\n` : "";
 	const source = entry.source ? `Source: ${entry.source}\n` : "";
 	return `### \`${entry.term}\`\n${aliases}${source}${entry.definition.trim()}`.trim();
+}
+
+/**
+ * Two-panel overlay component for browsing glossary terms.
+ * Left panel: searchable list of terms (38% width)
+ * Right panel: definition view with aliases, source, and wrapped text (62% width)
+ */
+class GlossaryOverlay implements Component {
+	private query: string = "";
+	private filtered: CompiledEntry[] = [];
+	private selectedIndex: number = 0;
+	private cachedLines: string[] | undefined = undefined;
+	private cachedWidth: number | undefined = undefined;
+
+	constructor(
+		private readonly entries: CompiledEntry[],
+		private readonly theme: any,
+		private readonly tui: any,
+		private readonly done: () => void,
+	) {
+		this.filtered = [...entries];
+	}
+
+	/** Filter entries by query string (searches term, aliases, definition). */
+	private updateFilter(): void {
+		if (this.query === "") {
+			this.filtered = [...this.entries];
+		} else {
+			const q = this.query.toLowerCase();
+			this.filtered = this.entries.filter(
+				(e) =>
+					e.term.toLowerCase().includes(q) ||
+					e.aliases?.some((a) => a.toLowerCase().includes(q)) ||
+					e.definition.toLowerCase().includes(q),
+			);
+		}
+		this.selectedIndex = Math.min(
+			this.selectedIndex,
+			Math.max(0, this.filtered.length - 1),
+		);
+	}
+
+	/** Build left panel lines: term list with selection highlight. */
+	private buildLeftPanel(width: number): string[] {
+		const lines: string[] = [];
+
+		if (this.filtered.length === 0) {
+			lines.push(truncateToWidth(this.theme.fg("muted", "  (no matches)"), width));
+			return lines;
+		}
+
+		for (let i = 0; i < this.filtered.length; i++) {
+			const entry = this.filtered[i]!;
+			const isSelected = i === this.selectedIndex;
+			const prefix = isSelected ? "▶ " : "  ";
+			const termText = isSelected
+				? this.theme.fg("accent", this.theme.bold(entry.term))
+				: entry.term;
+			const line = truncateToWidth(prefix + termText, width);
+			const fullLine = line + " ".repeat(Math.max(0, width - visibleWidth(line)));
+			lines.push(
+				isSelected && this.theme.bg
+					? this.theme.bg("selectedBg", fullLine)
+					: fullLine,
+			);
+		}
+
+		return lines;
+	}
+
+	/** Build right panel lines: term heading, aliases, source, and definition. */
+	private buildRightPanel(width: number): string[] {
+		const lines: string[] = [];
+
+		const entry = this.filtered[this.selectedIndex];
+		if (!entry) {
+			lines.push(this.theme.fg("muted", " Select a term to view its definition."));
+			return lines;
+		}
+
+		// Heading
+		lines.push(truncateToWidth(" " + this.theme.fg("accent", this.theme.bold(entry.term)), width));
+		lines.push("");
+
+		// Aliases
+		if (entry.aliases && entry.aliases.length > 0) {
+			const aliasText = this.theme.fg("muted", " Aliases: ") + entry.aliases.join(", ");
+			lines.push(...wrapTextWithAnsi(aliasText, width));
+			lines.push("");
+		}
+
+		// Source
+		if (entry.source) {
+			const sourceText = this.theme.fg("muted", " Source: ") + this.theme.fg("dim", entry.source);
+			lines.push(truncateToWidth(sourceText, width));
+			lines.push("");
+		}
+
+		// Definition
+		lines.push(...wrapTextWithAnsi(" " + entry.definition.trim(), width));
+
+		return lines;
+	}
+
+	/** Render overlay: borders + search row + fixed-height content rows side by side. */
+	render(width: number): string[] {
+		if (this.cachedLines !== undefined && this.cachedWidth === width) {
+			return this.cachedLines;
+		}
+
+		// Each row is: │ + leftWidth + │ + rightWidth + │ = leftWidth + rightWidth + 3
+		// So content columns available = width - 3, split 38/62
+		const innerWidth = width - 3; // subtract 3 border chars (left │, center │, right │)
+		const leftWidth = Math.max(10, Math.floor(innerWidth * 0.38));
+		const rightWidth = Math.max(10, innerWidth - leftWidth);
+
+		// Render enough rows; the overlay system clips to maxHeight: "75%" automatically.
+		const CONTENT_ROWS = Math.max(this.entries.length, 20);
+
+		const fg = (c: string, t: string) => this.theme.fg(c, t);
+		const lines: string[] = [];
+
+		// Top border
+		lines.push(fg("border", "┌" + "─".repeat(leftWidth) + "┬" + "─".repeat(rightWidth) + "┐"));
+
+		// Search row
+		const searchRaw = " Search: " + this.query + (this.query.length === 0 ? fg("muted", "█") : "█");
+		const searchLine = truncateToWidth(searchRaw, leftWidth);
+		const searchPadded = searchLine + " ".repeat(Math.max(0, leftWidth - visibleWidth(searchLine)));
+
+		const hint = fg("muted", " ↑↓ navigate • esc/enter close");
+		const hintLine = truncateToWidth(hint, rightWidth);
+		const hintPadded = hintLine + " ".repeat(Math.max(0, rightWidth - visibleWidth(hintLine)));
+
+		lines.push(fg("border", "│") + searchPadded + fg("border", "│") + hintPadded + fg("border", "│"));
+
+		// Mid separator
+		lines.push(fg("border", "├" + "─".repeat(leftWidth) + "┼" + "─".repeat(rightWidth) + "┤"));
+
+		// Content: zip left + right panel lines, padded to CONTENT_ROWS
+		const leftLines = this.buildLeftPanel(leftWidth);
+		const rightLines = this.buildRightPanel(rightWidth);
+
+		for (let i = 0; i < CONTENT_ROWS; i++) {
+			const lRaw = leftLines[i] ?? "";
+			const rRaw = rightLines[i] ?? "";
+			const lPad = lRaw + " ".repeat(Math.max(0, leftWidth - visibleWidth(lRaw)));
+			const rPad = rRaw + " ".repeat(Math.max(0, rightWidth - visibleWidth(rRaw)));
+			lines.push(fg("border", "│") + lPad + fg("border", "│") + rPad + fg("border", "│"));
+		}
+
+		// Bottom border
+		lines.push(fg("border", "└" + "─".repeat(leftWidth) + "┴" + "─".repeat(rightWidth) + "┘"));
+
+		this.cachedLines = lines;
+		this.cachedWidth = width;
+		return lines;
+	}
+
+	/** Handle keyboard input: close, navigate, search. */
+	handleInput(data: string): void {
+		if (matchesKey(data, Key.escape) || matchesKey(data, Key.enter)) {
+			this.done();
+			return;
+		}
+
+		if (matchesKey(data, Key.up)) {
+			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+			this.invalidate();
+			this.tui.requestRender();
+			return;
+		}
+
+		if (matchesKey(data, Key.down)) {
+			this.selectedIndex = Math.min(this.filtered.length - 1, this.selectedIndex + 1);
+			this.invalidate();
+			this.tui.requestRender();
+			return;
+		}
+
+		if (matchesKey(data, Key.backspace)) {
+			if (this.query.length > 0) {
+				this.query = this.query.slice(0, -1);
+				this.updateFilter();
+				this.invalidate();
+				this.tui.requestRender();
+			}
+			return;
+		}
+
+		// Printable character → append to search query
+		if (data.length === 1 && data.charCodeAt(0) >= 32) {
+			this.query += data;
+			this.updateFilter();
+			this.invalidate();
+			this.tui.requestRender();
+		}
+	}
+
+	/** Clear render cache so next render() recomputes. */
+	invalidate(): void {
+		this.cachedLines = undefined;
+		this.cachedWidth = undefined;
+	}
 }
 
 function describeGlossaryEntry(entry: Partial<GlossaryEntry>, index: number): string {
@@ -265,7 +471,18 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			ctx.ui.notify(`Glossary ready: ${entries.length} entries loaded`, "info");
+			// No args: open interactive browse overlay
+			await ctx.ui.custom<void>(
+				(tui, theme, _kb, done) => new GlossaryOverlay(entries, theme, tui, done),
+				{
+					overlay: true,
+					overlayOptions: {
+						width: "90%",
+						maxHeight: "75%",
+						anchor: "center",
+					},
+				},
+			);
 		},
 	});
 
