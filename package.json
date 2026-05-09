@@ -1,6 +1,6 @@
 {
   "name": "pi-glossary",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Pi extension that lazy-loads glossary definitions into the system prompt when prompts mention matching terms",
   "author": "Ronie",
   "license": "MIT",
@@ -18,25 +18,19 @@
     "pi",
     "pi-coding-agent",
     "glossary",
-    "extension",
-    "skill"
+    "extension"
   ],
   "scripts": {
     "postinstall": "node scripts/install-default-glossary.js"
   },
   "files": [
     "index.ts",
-    "README.md",
     "glossary.json",
-    "scripts",
-    "skills"
+    "README.md"
   ],
   "pi": {
     "extensions": [
       "./index.ts"
-    ],
-    "skills": [
-      "skills"
     ]
   },
   "peerDependencies": {
