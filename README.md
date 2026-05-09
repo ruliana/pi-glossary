@@ -12,8 +12,8 @@ More about it in [this blog post](https://ronie.medium.com/agent-glossary-teachi
 
 1. On session start, the extension loads `~/.pi/agent/glossary.json` or `~/.pi/agent/glossary.jsonl`, and `.pi/glossary.json` or `.pi/glossary.jsonl` from the current project.
 2. Project entries override global entries when they use the same `term`.
-3. Before an agent starts, it scans the user's prompt for matching glossary terms, aliases, or explicit regex patterns.
-4. If terms match, only terms not already loaded in the current session are injected into the system prompt.
+3. Before an agent starts, it scans the user's prompt for all matching glossary terms, aliases, or explicit regex patterns.
+4. If one or more terms match, only terms not already loaded in the current session are injected into the system prompt.
 5. Loaded glossary handles stay visible for the rest of the session in the footer status as `Glossary: term, term`.
 
 ## What It Does
@@ -111,6 +111,8 @@ That means these work well out of the box:
 - multi-word phrases like `railway topic`
 
 Use `pattern` when you want total control over matching.
+
+When multiple entries match the same prompt, all matching entries are considered. Entries already loaded earlier in the session are skipped so they are not injected again.
 
 ## Commands
 
