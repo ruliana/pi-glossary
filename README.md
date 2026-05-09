@@ -32,6 +32,8 @@ More about it in [this blog post](https://ronie.medium.com/agent-glossary-teachi
 pi install git:github.com/ruliana/pi-glossary
 ```
 
+On first install, pi-glossary creates a default global glossary at `~/.pi/agent/glossary.json` if neither `~/.pi/agent/glossary.json` nor `~/.pi/agent/glossary.jsonl` already exists.
+
 To remove:
 
 ```bash

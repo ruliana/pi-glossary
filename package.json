@@ -21,9 +21,14 @@
     "extension",
     "skill"
   ],
+  "scripts": {
+    "postinstall": "node scripts/install-default-glossary.js"
+  },
   "files": [
     "index.ts",
     "README.md",
+    "glossary.json",
+    "scripts",
     "skills"
   ],
   "pi": {
