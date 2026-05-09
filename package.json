@@ -20,8 +20,12 @@
     "glossary",
     "extension"
   ],
+  "scripts": {
+    "postinstall": "node scripts/install-default-glossary.js"
+  },
   "files": [
     "index.ts",
+    "glossary.json",
     "README.md"
   ],
   "pi": {

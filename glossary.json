@@ -1,0 +1,6 @@
+[
+  {
+    "term": "pi-glossary",
+    "definition": "pi-glossary is a Pi extension that lazy-loads glossary definitions into the agent context when user prompts mention matching terms. It reads global glossary entries from ~/.pi/agent/glossary.json and project-specific entries from .pi/glossary.json."
+  }
+]
