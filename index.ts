@@ -210,9 +210,9 @@ class GlossaryOverlay implements Component {
 			const entry = this.filtered[i]!;
 			const isSelected = i === this.selectedIndex;
 			const prefix = isSelected ? "▶ " : "  ";
-			const highlight = (s: string) => this.theme.fg("accent", this.theme.bold(s));
+			const highlight = (s: string) => this.theme.fg("warning", this.theme.bold(s));
 			const termText = isSelected
-				? this.theme.fg("accent", this.theme.bold(
+				? this.theme.fg("warning", this.theme.bold(
 					this.query ? highlightMatches(entry.term, this.query, (s) => `\x1b[4m${s}\x1b[24m`) : entry.term,
 				  ))
 				: this.query
@@ -259,7 +259,7 @@ class GlossaryOverlay implements Component {
 		}
 
 		// Definition
-		const highlight = (s: string) => this.theme.fg("accent", this.theme.bold(s));
+		const highlight = (s: string) => this.theme.fg("warning", this.theme.bold(s));
 		const defText = this.query
 			? highlightMatches(entry.definition.trim(), this.query, highlight)
 			: entry.definition.trim();
@@ -680,7 +680,7 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 				render(width: number): string[] {
 					const lines = inner.render(width);
 					if (activeMatchers.length === 0) return lines;
-					const hl = (s: string) => fullTheme.fg("accent", fullTheme.bold(s));
+					const hl = (s: string) => fullTheme.fg("warning", fullTheme.bold(s));
 					return lines.map((line) => {
 						// CURSOR_MARKER is an APC sequence (`\x1b_pi:c\x07`). The local
 						// ANSI parser only handles CSI, so the marker leaks into the
