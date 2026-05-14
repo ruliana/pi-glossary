@@ -165,7 +165,7 @@ function extractRefs(definition: string): string[] {
  */
 async function expandTemplate(definition: string, cwd: string): Promise<string> {
 	if (!definition.includes("{{")) return definition;
-	const matches = [...definition.matchAll(/\{\{([^}]+)\}\}/g)];
+	const matches = [...definition.matchAll(/\{\{(.+?)\}\}/g)];
 	if (matches.length === 0) return definition;
 
 	const results = new Map<string, string>();
@@ -182,7 +182,7 @@ async function expandTemplate(definition: string, cwd: string): Promise<string> 
 		results.set(command, output);
 	}
 
-	return definition.replace(/\{\{([^}]+)\}\}/g, (_, cmd: string) => results.get(cmd.trim()) ?? "");
+	return definition.replace(/\{\{(.+?)\}\}/g, (_, cmd: string) => results.get(cmd.trim()) ?? "");
 }
 
 /**
