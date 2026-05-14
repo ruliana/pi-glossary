@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -155,6 +156,33 @@ function formatEntry(entry: CompiledEntry): string {
 
 function extractRefs(definition: string): string[] {
 	return [...definition.matchAll(/\[\[([^\]]+)\]\]/g)].map((m) => m[1]!.trim());
+}
+
+/**
+ * Expand `{{shell command}}` placeholders in a definition by running each unique command
+ * in the given working directory. Each distinct command runs at most once; failures
+ * produce an inline `[error: ...]` marker rather than throwing.
+ */
+async function expandTemplate(definition: string, cwd: string): Promise<string> {
+	if (!definition.includes("{{")) return definition;
+	const matches = [...definition.matchAll(/\{\{(.+?)\}\}/g)];
+	if (matches.length === 0) return definition;
+
+	const results = new Map<string, string>();
+	for (const match of matches) {
+		const command = match[1]!.trim();
+		if (results.has(command)) continue;
+		let output: string;
+		try {
+			output = execSync(command, { cwd, encoding: "utf8", timeout: 5000 }).trim();
+		} catch (error) {
+			const msg = error instanceof Error ? error.message.split("\n")[0] : String(error);
+			output = `[error: ${msg}]`;
+		}
+		results.set(command, output);
+	}
+
+	return definition.replace(/\{\{(.+?)\}\}/g, (_, cmd: string) => results.get(cmd.trim()) ?? "");
 }
 
 /**
@@ -634,8 +662,13 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 				updateGlossaryWidget(ctx);
 			}
 
+			const expandedEntry = {
+				...entry,
+				definition: await expandTemplate(entry.definition, ctx.cwd),
+			};
+
 			return {
-				content: [{ type: "text" as const, text: formatEntry(entry) }],
+				content: [{ type: "text" as const, text: formatEntry(expandedEntry) }],
 			};
 		},
 	});
@@ -732,9 +765,16 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 		appendLoadedTerms(newlyMatched.map((entry) => entry.term));
 		updateGlossaryWidget(ctx);
 
-		const injectedGlossary = newlyMatched.map(formatEntry).join("\n\n");
+		const expandedEntries = await Promise.all(
+			newlyMatched.map(async (entry) => ({
+				...entry,
+				definition: await expandTemplate(entry.definition, ctx.cwd),
+			})),
+		);
 
-		const hasRefs = newlyMatched.some((entry) => extractRefs(entry.definition).length > 0);
+		const injectedGlossary = expandedEntries.map(formatEntry).join("\n\n");
+
+		const hasRefs = expandedEntries.some((entry) => extractRefs(entry.definition).length > 0);
 		const refHint = hasRefs
 			? "\n\nSome definitions above contain `[[term-name]]` cross-references to related glossary terms. Use the `glossary_lookup` tool to retrieve a referenced term's definition if it is relevant to the current task."
 			: "";

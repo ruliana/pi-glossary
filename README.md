@@ -21,6 +21,7 @@ More about it in [this blog post](https://ronie.medium.com/agent-glossary-teachi
 - Loads glossary entries from project-scoped `.pi/glossary.json` or `.pi/glossary.jsonl`
 - Matches canonical terms and optional aliases out of the box
 - Supports custom regex triggers per entry
+- Expands `{{shell command}}` placeholders in definitions at injection time
 - Validates glossary entries and shows actionable errors
 - Reloads glossary configuration without restarting pi
 - Shows loaded glossary handles in the footer status for the whole session
@@ -83,12 +84,35 @@ If both `.json` and `.jsonl` exist in the same scope, the extension raises an er
 | Field | Required | Description |
 |-------|----------|-------------|
 | `term` | Yes | Canonical glossary handle |
-| `definition` | Yes | Definition injected when the entry matches |
+| `definition` | Yes | Definition injected when the entry matches. Supports `{{shell command}}` template placeholders (see below). |
 | `aliases` | No | Additional plain-text aliases |
 | `pattern` | No | Explicit regex trigger; overrides the default matcher |
 | `flags` | No | Regex flags, defaults to `iu` |
 | `enabled` | No | Set to `false` to disable an entry |
 | `source` | No | Descriptive provenance string included in injected context |
+
+## Shell Command Templates
+
+Definition strings can embed shell commands using `{{command}}` placeholders. Each placeholder is replaced with the command's stdout (trimmed) right before the definition is injected into the agent context or returned by `glossary_lookup`.
+
+```json
+{
+  "term": "current branch",
+  "definition": "The current branch in {{pwd}} is {{git branch --show-current}}."
+}
+```
+
+When this term is matched, the agent receives something like:
+
+```
+The current branch in /home/user/myproject is feat/new-login.
+```
+
+**Rules:**
+- Commands run in the session's working directory (`ctx.cwd`).
+- Each distinct command in a definition runs at most once per injection.
+- If a command exits with an error or times out (5 s limit), the placeholder is replaced with `[error: <message>]` rather than stopping the injection.
+- The `/glossary` browse overlay shows the raw template text (unexpanded), since expansion happens at agent-start time.
 
 ## Validation
 
