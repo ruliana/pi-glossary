@@ -1,6 +1,6 @@
 # pi-glossary
 
-A [pi](https://github.com/nichochar/pi-coding-agent) extension that lazy-loads glossary definitions into the system prompt when the user's prompt mentions matching terms.
+A [pi](https://github.com/nichochar/pi-coding-agent) extension that lazy-loads glossary definitions into the agent context when the user's prompt mentions matching terms.
 
 ## Why
 
@@ -13,7 +13,7 @@ More about it in [this blog post](https://ronie.medium.com/agent-glossary-teachi
 1. On session start, the extension loads `~/.pi/agent/glossary.json` or `~/.pi/agent/glossary.jsonl`, and `.pi/glossary.json` or `.pi/glossary.jsonl` from the current project.
 2. Project entries override global entries when they use the same `term`.
 3. Before an agent starts, it scans the user's prompt for all matching glossary terms, aliases, or explicit regex patterns.
-4. If one or more terms match, only terms not already loaded in the current session are injected into the system prompt.
+4. If one or more terms match, only terms not already loaded in the current session are appended as a user-level context message (custom type `glossary`) immediately after the user's message, before the agent starts. The first injected message includes guidance for interpreting glossary definitions; later injected messages include only the `## Glossary` heading and new term definitions.
 5. Loaded glossary handles stay visible for the rest of the session in the footer status as `Glossary: term, term`.
 
 ## What It Does
@@ -25,7 +25,7 @@ More about it in [this blog post](https://ronie.medium.com/agent-glossary-teachi
 - Validates glossary entries and shows actionable errors
 - Reloads glossary configuration without restarting pi
 - Shows loaded glossary handles in the footer status for the whole session
-- Avoids re-injecting glossary entries that were already loaded earlier in the session
+- Avoids re-appending glossary entries that were already loaded earlier in the session
 
 ## Installation
 
@@ -85,11 +85,11 @@ If both `.json` and `.jsonl` exist in the same scope, the extension raises an er
 |-------|----------|-------------|
 | `term` | Yes | Canonical glossary handle |
 | `definition` | Yes | Definition injected when the entry matches. Supports `{{shell command}}` template placeholders (see below). |
-| `aliases` | No | Additional plain-text aliases |
+| `aliases` | No | Additional plain-text aliases used for matching; not included in injected context |
 | `pattern` | No | Explicit regex trigger; overrides the default matcher |
 | `flags` | No | Regex flags, defaults to `iu` |
 | `enabled` | No | Set to `false` to disable an entry |
-| `source` | No | Descriptive provenance string included in injected context |
+| `source` | No | Descriptive provenance string shown in the glossary browser; not included in injected context |
 
 ## Shell Command Templates
 

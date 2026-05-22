@@ -22,6 +22,9 @@ type CompiledEntry = GlossaryEntry & {
 	matcher: RegExp;
 };
 
+const GLOSSARY_HEADING = "## Glossary";
+const GLOSSARY_PREAMBLE = "The user's prompt referenced explicit project glossary handles. Treat the following definitions as authoritative for the rest of this session. Reuse them exactly as project-local language, and do not ask the user to restate them unless the definitions conflict or are ambiguous.";
+
 function escapeRegExp(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -149,9 +152,7 @@ function matchesText(matcher: RegExp, text: string): boolean {
 }
 
 function formatEntry(entry: CompiledEntry): string {
-	const aliases = entry.aliases?.length ? `Aliases: ${entry.aliases.join(", ")}\n` : "";
-	const source = entry.source ? `Source: ${entry.source}\n` : "";
-	return `### \`${entry.term}\`\n${aliases}${source}${entry.definition.trim()}`.trim();
+	return `### \`${entry.term}\`\n${entry.definition.trim()}`.trim();
 }
 
 function extractRefs(definition: string): string[] {
@@ -492,6 +493,7 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 	let termMap: Map<string, CompiledEntry> = new Map();
 	let loadError: string | undefined;
 	let loadedTermsForSession = new Set<string>();
+	let hasInjectedGlossaryPreamble = false;
 
 	const appendLoadedTerms = (terms: string[]) => {
 		for (const term of terms) {
@@ -675,6 +677,7 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		loadedTermsForSession = new Set<string>();
+		hasInjectedGlossaryPreamble = false;
 		updateGlossaryWidget(ctx);
 		const result = loadGlossary(ctx.cwd);
 		if (result.error) {
@@ -762,8 +765,7 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 			return;
 		}
 
-		appendLoadedTerms(newlyMatched.map((entry) => entry.term));
-		updateGlossaryWidget(ctx);
+		const newTermNames = newlyMatched.map((entry) => entry.term);
 
 		const expandedEntries = await Promise.all(
 			newlyMatched.map(async (entry) => ({
@@ -772,6 +774,9 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 			})),
 		);
 
+		appendLoadedTerms(newTermNames);
+		updateGlossaryWidget(ctx);
+
 		const injectedGlossary = expandedEntries.map(formatEntry).join("\n\n");
 
 		const hasRefs = expandedEntries.some((entry) => extractRefs(entry.definition).length > 0);
@@ -779,8 +784,19 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 			? "\n\nSome definitions above contain `[[term-name]]` cross-references to related glossary terms. Use the `glossary_lookup` tool to retrieve a referenced term's definition if it is relevant to the current task."
 			: "";
 
+		const glossaryHeader = hasInjectedGlossaryPreamble
+			? GLOSSARY_HEADING
+			: `${GLOSSARY_HEADING}\n${GLOSSARY_PREAMBLE}`;
+		const content = `${glossaryHeader}\n\n${injectedGlossary}${refHint}`;
+		hasInjectedGlossaryPreamble = true;
+
 		return {
-			systemPrompt: `${event.systemPrompt}\n\n## Glossary\nThe user's prompt referenced explicit project glossary handles. Treat the following definitions as authoritative for this turn. Reuse them exactly as project-local language, and do not ask the user to restate them unless the definitions conflict or are ambiguous.\n\n${injectedGlossary}${refHint}`,
+			message: {
+				customType: "glossary",
+				content,
+				display: true,
+				details: { terms: newTermNames },
+			},
 		};
 	});
 
