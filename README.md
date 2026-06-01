@@ -11,14 +11,16 @@ More about it in [this blog post](https://ronie.medium.com/agent-glossary-teachi
 ## How It Works
 
 1. On session start, the extension loads `~/.pi/agent/glossary.json` or `~/.pi/agent/glossary.jsonl`, and `.pi/glossary.json` or `.pi/glossary.jsonl` from the current project.
-2. Project entries override global entries when they use the same `term`.
-3. Before an agent starts, it scans the user's prompt for all matching glossary terms, aliases, or explicit regex patterns.
-4. If one or more terms match, only terms not already loaded in the current session are appended as a user-level context message (custom type `glossary`) immediately after the user's message, before the agent starts. The first injected message includes guidance for interpreting glossary definitions; later injected messages include only the `## Glossary` heading and new term definitions.
-5. Loaded glossary handles stay visible for the rest of the session in the footer status as `Glossary: term, term`.
+2. Either file may contain `{"include": "path_or_url"}` entries to inline entries from another local file or URL at that position (see [Include Directives](#include-directives)).
+3. Project entries override global entries when they use the same `term`. Within a file, later entries override earlier ones.
+4. Before an agent starts, it scans the user's prompt for all matching glossary terms, aliases, or explicit regex patterns.
+5. If one or more terms match, only terms not already loaded in the current session are appended as a user-level context message (custom type `glossary`) immediately after the user's message, before the agent starts. The first injected message includes guidance for interpreting glossary definitions; later injected messages include only the `## Glossary` heading and new term definitions.
+6. Loaded glossary handles stay visible for the rest of the session in the footer status as `Glossary: term, term`.
 
 ## What It Does
 
 - Loads glossary entries from project-scoped `.pi/glossary.json` or `.pi/glossary.jsonl`
+- Supports `{"include": "path_or_url"}` entries to pull in remote or local glossaries inline
 - Matches canonical terms and optional aliases out of the box
 - Supports custom regex triggers per entry
 - Expands `{{shell command}}` placeholders in definitions at injection time
@@ -78,6 +80,45 @@ JSON Lines is also supported, with one entry per line:
 When the same `term` exists in both scopes, the project entry wins.
 
 If both `.json` and `.jsonl` exist in the same scope, the extension raises an error and asks you to keep only one.
+
+## Include Directives
+
+Any position in a glossary file can be an include directive instead of a regular entry:
+
+```json
+{ "include": "path/to/other.json" }
+{ "include": "https://raw.githubusercontent.com/org/repo/main/glossary.json" }
+{ "include": "https://gist.githubusercontent.com/user/id/raw/glossary.jsonl" }
+```
+
+Includes work in both JSON arrays and JSONL files. The referenced source is expanded in-place: entries from the included file appear at the position of the `include` directive, as if you had copy-pasted them there.
+
+**Priority follows list order** — entries that appear later in the file have higher priority (override earlier ones). This means you can mix includes and local entries to control what wins:
+
+```json
+[
+  { "include": "https://example.com/team-glossary.json" },
+  { "term": "deploy", "definition": "project-specific override of 'deploy'" }
+]
+```
+
+In this example, `deploy` from the URL is loaded first, then the local entry overwrites it.
+
+**Supported sources:**
+
+| Source | Example |
+|--------|---------|
+| Local path (relative) | `"include": "../shared/glossary.json"` |
+| Local path (absolute) | `"include": "/home/user/.config/glossary.json"` |
+| Local path (no extension) | `"include": "extras"` — resolves to `extras.json` or `extras.jsonl` |
+| GitHub raw file | `"include": "https://raw.githubusercontent.com/org/repo/main/glossary.json"` |
+| GitHub Gist | `"include": "https://gist.githubusercontent.com/user/id/raw/glossary.jsonl"` |
+| Plain URL | `"include": "https://example.com/glossary.json"` |
+
+**Rules:**
+- Circular includes (A includes B which includes A) are detected and skipped with a warning.
+- A failed include (file not found, network error, parse error) is reported as a warning and skipped — other entries still load.
+- Included files may themselves contain `include` directives (recursive).
 
 ## Glossary Entry Fields
 
