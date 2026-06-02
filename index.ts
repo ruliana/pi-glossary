@@ -488,6 +488,149 @@ function resolveGlossaryFile(basePath: string): string {
 	return jsonFile;
 }
 
+type GlossaryInclude = { include: string };
+
+function isIncludeEntry(entry: unknown): entry is GlossaryInclude {
+	return entry !== null && typeof entry === "object" && typeof (entry as any).include === "string";
+}
+
+function isUrl(source: string): boolean {
+	return source.startsWith("http://") || source.startsWith("https://");
+}
+
+function isGitHubUrl(url: string): boolean {
+	return /https?:\/\/(?:raw\.githubusercontent\.com|gist\.githubusercontent\.com|api\.github\.com|github\.com)/.test(url);
+}
+
+/**
+ * Convert browser-visible GitHub URLs to their raw/downloadable equivalents so
+ * users can paste URLs directly from the GitHub UI without hunting for "Raw".
+ *
+ * Handled patterns:
+ *   github.com/USER/REPO/blob/REF/PATH  → raw.githubusercontent.com/USER/REPO/REF/PATH
+ *   github.com/USER/REPO/raw/REF/PATH   → raw.githubusercontent.com/USER/REPO/REF/PATH
+ *   gist.github.com/USER/ID/raw/…       → gist.githubusercontent.com/USER/ID/raw/…
+ */
+function normalizeGitHubUrl(url: string): string {
+	// File viewer: /blob/ → raw
+	const blobMatch = url.match(/^https?:\/\/github\.com\/([^/]+\/[^/]+)\/blob\/(.+)$/);
+	if (blobMatch) return `https://raw.githubusercontent.com/${blobMatch[1]}/${blobMatch[2]}`;
+
+	// Already-raw github.com link (less common but valid)
+	const rawMatch = url.match(/^https?:\/\/github\.com\/([^/]+\/[^/]+)\/raw\/(.+)$/);
+	if (rawMatch) return `https://raw.githubusercontent.com/${rawMatch[1]}/${rawMatch[2]}`;
+
+	// Gist "Raw" button URL (gist.github.com → gist.githubusercontent.com)
+	const gistRawMatch = url.match(/^https?:\/\/gist\.github\.com\/(.+\/raw\/.+)$/);
+	if (gistRawMatch) return `https://gist.githubusercontent.com/${gistRawMatch[1]}`;
+
+	return url;
+}
+
+function getGitHubToken(): string | null {
+	if (process.env.GITHUB_TOKEN) return process.env.GITHUB_TOKEN;
+	try {
+		const token = execSync("gh auth token", { encoding: "utf8", timeout: 5000 }).trim();
+		return token || null;
+	} catch {
+		return null;
+	}
+}
+
+async function fetchGlossaryUrl(url: string): Promise<string> {
+	const headers: Record<string, string> = {};
+	if (isGitHubUrl(url)) {
+		const token = getGitHubToken();
+		if (token) headers["Authorization"] = `Bearer ${token}`;
+	}
+	const response = await fetch(url, { headers });
+	if (!response.ok) {
+		throw new Error(`HTTP ${response.status} ${response.statusText}`);
+	}
+	return response.text();
+}
+
+/**
+ * Expand a flat list of raw parsed items (entries + include directives) into a
+ * flat list of validated GlossaryEntry objects. Include directives are resolved
+ * in-place: their entries appear at the position of the directive. The caller
+ * iterates this list in reverse so the first entry in each file has highest priority.
+ *
+ * `visited` prevents infinite include cycles. `warnings` collects non-fatal errors.
+ * `loadFile` is passed in so this function stays free of circular module-level references.
+ */
+async function resolveGlossaryItems(
+	items: unknown[],
+	defaultSource: string,
+	cwd: string,
+	visited: Set<string>,
+	warnings: string[],
+	loadFile: (file: string, cwd: string, visited: Set<string>, warnings: string[]) => Promise<{ found: boolean; entries: GlossaryEntry[]; path: string; label?: string }>,
+): Promise<GlossaryEntry[]> {
+	const result: GlossaryEntry[] = [];
+	let entryCount = 0;
+
+	for (const item of items) {
+		if (isIncludeEntry(item)) {
+			const rawSource = item.include.trim();
+			const source = isUrl(rawSource) ? normalizeGitHubUrl(rawSource) : rawSource;
+			const cycleKey = isUrl(source) ? source : path.resolve(cwd, source);
+
+			if (visited.has(cycleKey)) {
+				warnings.push(`Skipping circular include: ${source}`);
+				continue;
+			}
+			visited.add(cycleKey);
+
+			try {
+				if (isUrl(source)) {
+					const raw = await fetchGlossaryUrl(source);
+					const pseudoFile = source.endsWith(".jsonl") ? "remote.jsonl" : "remote.json";
+					const nested = parseGlossaryFile(raw, pseudoFile);
+					const expanded = await resolveGlossaryItems(nested, source, cwd, visited, warnings, loadFile);
+					result.push(...expanded);
+				} else {
+					const absBase = path.isAbsolute(source) ? source : path.resolve(cwd, source);
+					const hasExtension = absBase.endsWith(".json") || absBase.endsWith(".jsonl");
+					const resolvedPath = hasExtension ? absBase : resolveGlossaryFile(absBase);
+					const fileResult = await loadFile(resolvedPath, cwd, visited, warnings);
+					result.push(...fileResult.entries);
+				}
+			} catch (error) {
+				const msg = error instanceof Error ? error.message : String(error);
+				warnings.push(`Failed to include ${source}: ${msg}`);
+			}
+		} else if (item && typeof item === "object" && (item as GlossaryEntry).enabled !== false) {
+			const validated = validateGlossaryEntry(item as GlossaryEntry, entryCount++);
+			result.push({ ...validated, source: validated.source ?? defaultSource });
+		}
+	}
+
+	return result;
+}
+
+async function loadGlossaryFile(
+	jsonFile: string,
+	cwd: string,
+	visited: Set<string>,
+	warnings: string[],
+): Promise<{ found: boolean; entries: GlossaryEntry[]; path: string; label?: string }> {
+	if (!fs.existsSync(jsonFile)) {
+		return { found: false, entries: [], path: jsonFile };
+	}
+
+	const raw = fs.readFileSync(jsonFile, "utf8");
+	const parsed = parseGlossaryFile(raw, jsonFile);
+
+	const sourceLabel = jsonFile.startsWith(os.homedir())
+		? jsonFile.replace(os.homedir(), "~")
+		: path.relative(cwd, jsonFile);
+
+	const entries = await resolveGlossaryItems(parsed, sourceLabel, cwd, visited, warnings, loadGlossaryFile);
+
+	return { found: true, entries, path: jsonFile, label: sourceLabel };
+}
+
 export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 	let entries: CompiledEntry[] = [];
 	let termMap: Map<string, CompiledEntry> = new Map();
@@ -501,47 +644,26 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 		}
 	};
 
-	const loadGlossaryFile = (jsonFile: string, cwd: string) => {
-		if (!fs.existsSync(jsonFile)) {
-			return { found: false, entries: [] as GlossaryEntry[], path: jsonFile };
-		}
-
-		const raw = fs.readFileSync(jsonFile, "utf8");
-		const parsed = parseGlossaryFile(raw, jsonFile);
-
-		const sourceLabel = jsonFile.startsWith(os.homedir())
-			? jsonFile.replace(os.homedir(), "~")
-			: path.relative(cwd, jsonFile);
-
-		const validatedEntries = parsed
-			.filter((entry) => entry && typeof entry === "object" && (entry as GlossaryEntry).enabled !== false)
-			.map((entry, index) => {
-				const validatedEntry = validateGlossaryEntry(entry as GlossaryEntry, index);
-				return {
-					...validatedEntry,
-					source: validatedEntry.source ?? sourceLabel,
-				};
-			});
-
-		return { found: true, entries: validatedEntries, path: jsonFile, label: sourceLabel };
-	};
-
-	const loadGlossary = (cwd: string) => {
+	const loadGlossary = async (cwd: string) => {
 		entries = [];
 		termMap = new Map();
 		loadError = undefined;
 
 		try {
+			const visited = new Set<string>();
+			const warnings: string[] = [];
 			const globalFile = resolveGlossaryFile(path.join(os.homedir(), ".pi", "agent", "glossary"));
 			const projectFile = resolveGlossaryFile(path.join(cwd, ".pi", "glossary"));
-			const globalResult = loadGlossaryFile(globalFile, cwd);
-			const projectResult = loadGlossaryFile(projectFile, cwd);
-			const mergedEntries = new Map<string, GlossaryEntry>();
+			const globalResult = await loadGlossaryFile(globalFile, cwd, visited, warnings);
+			const projectResult = await loadGlossaryFile(projectFile, cwd, visited, warnings);
 
-			for (const entry of globalResult.entries) {
+			// Merge in reverse so first entry in each file wins (top priority).
+			// Project file is iterated last so it overrides global.
+			const mergedEntries = new Map<string, GlossaryEntry>();
+			for (const entry of [...globalResult.entries].reverse()) {
 				mergedEntries.set(entry.term, entry);
 			}
-			for (const entry of projectResult.entries) {
+			for (const entry of [...projectResult.entries].reverse()) {
 				mergedEntries.set(entry.term, entry);
 			}
 
@@ -568,10 +690,11 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 				found: foundFiles.length > 0,
 				count: entries.length,
 				files: foundFiles,
+				warnings,
 			};
 		} catch (error) {
 			loadError = error instanceof Error ? error.message : String(error);
-			return { found: false, count: 0, files: [] as string[], error: loadError };
+			return { found: false, count: 0, files: [] as string[], error: loadError, warnings: [] as string[] };
 		}
 	};
 
@@ -601,10 +724,13 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 			if (trimmed === "reload") {
 				loadedTermsForSession = new Set<string>();
 				updateGlossaryWidget(ctx);
-				const result = loadGlossary(ctx.cwd);
+				const result = await loadGlossary(ctx.cwd);
 				if (result.error) {
 					ctx.ui.notify(`Glossary reload failed: ${result.error}`, "error");
 					return;
+				}
+				for (const w of result.warnings) {
+					ctx.ui.notify(`Glossary warning: ${w}`, "warning");
 				}
 				ctx.ui.notify(
 					result.found
@@ -679,10 +805,13 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 		loadedTermsForSession = new Set<string>();
 		hasInjectedGlossaryPreamble = false;
 		updateGlossaryWidget(ctx);
-		const result = loadGlossary(ctx.cwd);
+		const result = await loadGlossary(ctx.cwd);
 		if (result.error) {
 			ctx.ui.notify(`Glossary load failed: ${result.error}`, "error");
 			return;
+		}
+		for (const w of result.warnings) {
+			ctx.ui.notify(`Glossary warning: ${w}`, "warning");
 		}
 		if (result.found && result.count > 0) {
 			ctx.ui.notify(
