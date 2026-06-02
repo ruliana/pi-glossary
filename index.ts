@@ -502,6 +502,31 @@ function isGitHubUrl(url: string): boolean {
 	return /https?:\/\/(?:raw\.githubusercontent\.com|gist\.githubusercontent\.com|api\.github\.com|github\.com)/.test(url);
 }
 
+/**
+ * Convert browser-visible GitHub URLs to their raw/downloadable equivalents so
+ * users can paste URLs directly from the GitHub UI without hunting for "Raw".
+ *
+ * Handled patterns:
+ *   github.com/USER/REPO/blob/REF/PATH  → raw.githubusercontent.com/USER/REPO/REF/PATH
+ *   github.com/USER/REPO/raw/REF/PATH   → raw.githubusercontent.com/USER/REPO/REF/PATH
+ *   gist.github.com/USER/ID/raw/…       → gist.githubusercontent.com/USER/ID/raw/…
+ */
+function normalizeGitHubUrl(url: string): string {
+	// File viewer: /blob/ → raw
+	const blobMatch = url.match(/^https?:\/\/github\.com\/([^/]+\/[^/]+)\/blob\/(.+)$/);
+	if (blobMatch) return `https://raw.githubusercontent.com/${blobMatch[1]}/${blobMatch[2]}`;
+
+	// Already-raw github.com link (less common but valid)
+	const rawMatch = url.match(/^https?:\/\/github\.com\/([^/]+\/[^/]+)\/raw\/(.+)$/);
+	if (rawMatch) return `https://raw.githubusercontent.com/${rawMatch[1]}/${rawMatch[2]}`;
+
+	// Gist "Raw" button URL (gist.github.com → gist.githubusercontent.com)
+	const gistRawMatch = url.match(/^https?:\/\/gist\.github\.com\/(.+\/raw\/.+)$/);
+	if (gistRawMatch) return `https://gist.githubusercontent.com/${gistRawMatch[1]}`;
+
+	return url;
+}
+
 function getGitHubToken(): string | null {
 	if (process.env.GITHUB_TOKEN) return process.env.GITHUB_TOKEN;
 	try {
@@ -547,7 +572,8 @@ async function resolveGlossaryItems(
 
 	for (const item of items) {
 		if (isIncludeEntry(item)) {
-			const source = item.include.trim();
+			const rawSource = item.include.trim();
+			const source = isUrl(rawSource) ? normalizeGitHubUrl(rawSource) : rawSource;
 			const cycleKey = isUrl(source) ? source : path.resolve(cwd, source);
 
 			if (visited.has(cycleKey)) {
