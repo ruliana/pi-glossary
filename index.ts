@@ -498,8 +498,27 @@ function isUrl(source: string): boolean {
 	return source.startsWith("http://") || source.startsWith("https://");
 }
 
+function isGitHubUrl(url: string): boolean {
+	return /https?:\/\/(?:raw\.githubusercontent\.com|gist\.githubusercontent\.com|api\.github\.com|github\.com)/.test(url);
+}
+
+function getGitHubToken(): string | null {
+	if (process.env.GITHUB_TOKEN) return process.env.GITHUB_TOKEN;
+	try {
+		const token = execSync("gh auth token", { encoding: "utf8", timeout: 5000 }).trim();
+		return token || null;
+	} catch {
+		return null;
+	}
+}
+
 async function fetchGlossaryUrl(url: string): Promise<string> {
-	const response = await fetch(url);
+	const headers: Record<string, string> = {};
+	if (isGitHubUrl(url)) {
+		const token = getGitHubToken();
+		if (token) headers["Authorization"] = `Bearer ${token}`;
+	}
+	const response = await fetch(url, { headers });
 	if (!response.ok) {
 		throw new Error(`HTTP ${response.status} ${response.statusText}`);
 	}
@@ -509,8 +528,8 @@ async function fetchGlossaryUrl(url: string): Promise<string> {
 /**
  * Expand a flat list of raw parsed items (entries + include directives) into a
  * flat list of validated GlossaryEntry objects. Include directives are resolved
- * in-place: their entries appear at the position of the directive, so later items
- * in the list have higher priority when the caller merges by term name.
+ * in-place: their entries appear at the position of the directive. The caller
+ * iterates this list in reverse so the first entry in each file has highest priority.
  *
  * `visited` prevents infinite include cycles. `warnings` collects non-fatal errors.
  * `loadFile` is passed in so this function stays free of circular module-level references.
@@ -612,13 +631,13 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 			const globalResult = await loadGlossaryFile(globalFile, cwd, visited, warnings);
 			const projectResult = await loadGlossaryFile(projectFile, cwd, visited, warnings);
 
-			// Merge: global first (lowest priority), project last (highest priority).
-			// Within each file, includes expand in-place so position determines priority.
+			// Merge in reverse so first entry in each file wins (top priority).
+			// Project file is iterated last so it overrides global.
 			const mergedEntries = new Map<string, GlossaryEntry>();
-			for (const entry of globalResult.entries) {
+			for (const entry of [...globalResult.entries].reverse()) {
 				mergedEntries.set(entry.term, entry);
 			}
-			for (const entry of projectResult.entries) {
+			for (const entry of [...projectResult.entries].reverse()) {
 				mergedEntries.set(entry.term, entry);
 			}
 

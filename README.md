@@ -93,16 +93,16 @@ Any position in a glossary file can be an include directive instead of a regular
 
 Includes work in both JSON arrays and JSONL files. The referenced source is expanded in-place: entries from the included file appear at the position of the `include` directive, as if you had copy-pasted them there.
 
-**Priority follows list order** — entries that appear later in the file have higher priority (override earlier ones). This means you can mix includes and local entries to control what wins:
+**Priority follows list order — top wins.** Entries that appear earlier in the file have higher priority. This means you control what wins by where you put things:
 
 ```json
 [
-  { "include": "https://example.com/team-glossary.json" },
-  { "term": "deploy", "definition": "project-specific override of 'deploy'" }
+  { "term": "deploy", "definition": "project-specific, wins over anything below" },
+  { "include": "https://example.com/team-glossary.json" }
 ]
 ```
 
-In this example, `deploy` from the URL is loaded first, then the local entry overwrites it.
+In this example, the local `deploy` entry is listed first and wins over any `deploy` from the URL.
 
 **Supported sources:**
 
@@ -119,6 +119,7 @@ In this example, `deploy` from the URL is loaded first, then the local entry ove
 - Circular includes (A includes B which includes A) are detected and skipped with a warning.
 - A failed include (file not found, network error, parse error) is reported as a warning and skipped — other entries still load.
 - Included files may themselves contain `include` directives (recursive).
+- GitHub URLs (raw files, gists) are fetched with authentication: `GITHUB_TOKEN` env var is tried first; if absent, the `gh` CLI's stored credentials are used (`gh auth token`). Private gists work as long as either is available.
 
 ## Glossary Entry Fields
 
