@@ -12,7 +12,7 @@ More about it in [this blog post](https://ronie.medium.com/agent-glossary-teachi
 
 1. On session start, the extension loads `~/.pi/agent/glossary.json` or `~/.pi/agent/glossary.jsonl`, and `.pi/glossary.json` or `.pi/glossary.jsonl` from the current project.
 2. Either file may contain `{"include": "path_or_url"}` entries to inline entries from another local file or URL at that position (see [Include Directives](#include-directives)).
-3. Project entries override global entries when they use the same `term`. Within a file, later entries override earlier ones.
+3. Project entries override global entries when they use the same `term`. Within a file, **earlier entries (top) take priority** over later ones.
 4. Before an agent starts, it scans the user's prompt for all matching glossary terms, aliases, or explicit regex patterns.
 5. If one or more terms match, only terms not already loaded in the current session are appended as a user-level context message (custom type `glossary`) immediately after the user's message, before the agent starts. The first injected message includes guidance for interpreting glossary definitions; later injected messages include only the `## Glossary` heading and new term definitions.
 6. Loaded glossary handles stay visible for the rest of the session in the footer status as `Glossary: term, term`.
@@ -111,9 +111,13 @@ In this example, the local `deploy` entry is listed first and wins over any `dep
 | Local path (relative) | `"include": "../shared/glossary.json"` |
 | Local path (absolute) | `"include": "/home/user/.config/glossary.json"` |
 | Local path (no extension) | `"include": "extras"` — resolves to `extras.json` or `extras.jsonl` |
-| GitHub raw file | `"include": "https://raw.githubusercontent.com/org/repo/main/glossary.json"` |
-| GitHub Gist | `"include": "https://gist.githubusercontent.com/user/id/raw/glossary.jsonl"` |
+| GitHub file (browser URL) | `"include": "https://github.com/org/repo/blob/main/glossary.json"` |
+| GitHub file (raw URL) | `"include": "https://raw.githubusercontent.com/org/repo/main/glossary.json"` |
+| GitHub Gist (browser Raw button) | `"include": "https://gist.github.com/user/id/raw/hash/glossary.jsonl"` |
+| GitHub Gist (raw URL) | `"include": "https://gist.githubusercontent.com/user/id/raw/hash/glossary.jsonl"` |
 | Plain URL | `"include": "https://example.com/glossary.json"` |
+
+Browser-visible GitHub URLs (the `/blob/` variant and the gist Raw button URL) are automatically converted to their downloadable equivalents, so you can paste them directly without editing.
 
 **Rules:**
 - Circular includes (A includes B which includes A) are detected and skipped with a warning.
