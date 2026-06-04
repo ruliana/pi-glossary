@@ -550,6 +550,65 @@ async function fetchGlossaryUrl(url: string): Promise<string> {
 	return response.text();
 }
 
+function parseSimpleYaml(yaml: string): Record<string, unknown> {
+	const result: Record<string, unknown> = {};
+	for (const line of yaml.split(/\r?\n/)) {
+		const colonIdx = line.indexOf(":");
+		if (colonIdx === -1) continue;
+		const key = line.slice(0, colonIdx).trim();
+		const rawValue = line.slice(colonIdx + 1).trim();
+		if (!key) continue;
+		if (rawValue.startsWith("[") && rawValue.endsWith("]")) {
+			result[key] = rawValue
+				.slice(1, -1)
+				.split(",")
+				.map((s) => s.trim().replace(/^["']|["']$/g, ""))
+				.filter(Boolean);
+		} else if (rawValue === "true") {
+			result[key] = true;
+		} else if (rawValue === "false") {
+			result[key] = false;
+		} else {
+			result[key] = rawValue.replace(/^["']|["']$/g, "");
+		}
+	}
+	return result;
+}
+
+function parseFrontmatter(content: string): { metadata: Record<string, unknown>; body: string } {
+	const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+	if (!match) return { metadata: {}, body: content };
+	return { metadata: parseSimpleYaml(match[1]!), body: match[2]! };
+}
+
+function parseScriptFrontmatter(content: string): { metadata: Record<string, unknown> } {
+	const match = content.match(/^#\s*---\r?\n((?:#[^\r\n]*\r?\n)*?)#\s*---/);
+	if (!match) return { metadata: {} };
+	const stripped = match[1]!.replace(/^#\s?/gm, "");
+	return { metadata: parseSimpleYaml(stripped) };
+}
+
+const SCRIPT_EXTENSIONS = new Set([".sh", ".bash", ".py", ".rb", ".js"]);
+const DEFINITION_EXTENSIONS = new Set([".md", ".txt"]);
+
+function scriptToCommand(scriptPath: string): string {
+	const ext = path.extname(scriptPath).toLowerCase();
+	const quoted = `"${scriptPath.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+	switch (ext) {
+		case ".sh":
+		case ".bash":
+			return `sh ${quoted}`;
+		case ".py":
+			return `python3 ${quoted}`;
+		case ".rb":
+			return `ruby ${quoted}`;
+		case ".js":
+			return `node ${quoted}`;
+		default:
+			return quoted;
+	}
+}
+
 /**
  * Expand a flat list of raw parsed items (entries + include directives) into a
  * flat list of validated GlossaryEntry objects. Include directives are resolved
@@ -631,6 +690,95 @@ async function loadGlossaryFile(
 	return { found: true, entries, path: jsonFile, label: sourceLabel };
 }
 
+async function loadGlossaryDir(
+	dirPath: string,
+	cwd: string,
+	visited: Set<string>,
+	warnings: string[],
+): Promise<{ found: boolean; entries: GlossaryEntry[]; path: string; label?: string }> {
+	if (!fs.existsSync(dirPath)) {
+		return { found: false, entries: [], path: dirPath };
+	}
+
+	let stat: fs.Stats;
+	try {
+		stat = fs.statSync(dirPath);
+	} catch {
+		return { found: false, entries: [], path: dirPath };
+	}
+	if (!stat.isDirectory()) {
+		return { found: false, entries: [], path: dirPath };
+	}
+
+	const sourceBase = dirPath.startsWith(os.homedir())
+		? dirPath.replace(os.homedir(), "~")
+		: path.relative(cwd, dirPath);
+	const label = `${sourceBase}/`;
+
+	const files = fs.readdirSync(dirPath).sort();
+	const entries: GlossaryEntry[] = [];
+
+	for (const file of files) {
+		if (file.startsWith(".")) continue;
+		const filePath = path.join(dirPath, file);
+		try {
+			if (!fs.statSync(filePath).isFile()) continue;
+		} catch {
+			continue;
+		}
+		const ext = path.extname(file).toLowerCase();
+		const stem = path.basename(file, ext);
+		const source = `${sourceBase}/${file}`;
+
+		try {
+			if (ext === ".json") {
+				const raw = fs.readFileSync(filePath, "utf8");
+				const parsed = JSON.parse(raw) as unknown;
+				const items = Array.isArray(parsed) ? parsed : [parsed];
+				const resolved = await resolveGlossaryItems(items, source, cwd, visited, warnings, loadGlossaryFile);
+				entries.push(...resolved);
+			} else if (DEFINITION_EXTENSIONS.has(ext)) {
+				const raw = fs.readFileSync(filePath, "utf8");
+				const { metadata, body } = parseFrontmatter(raw);
+				if (!body.trim()) {
+					warnings.push(`Skipping empty glossary file: ${source}`);
+					continue;
+				}
+				const entry: GlossaryEntry = {
+					term: (metadata.term as string | undefined) ?? stem,
+					definition: body.trim(),
+					source,
+				};
+				if (metadata.aliases !== undefined) entry.aliases = metadata.aliases as string[];
+				if (metadata.pattern !== undefined) entry.pattern = metadata.pattern as string;
+				if (metadata.flags !== undefined) entry.flags = metadata.flags as string;
+				if (metadata.enabled !== undefined) entry.enabled = metadata.enabled as boolean;
+				entries.push(validateGlossaryEntry(entry, entries.length));
+			} else if (SCRIPT_EXTENSIONS.has(ext)) {
+				const raw = fs.readFileSync(filePath, "utf8");
+				const { metadata } = parseScriptFrontmatter(raw);
+				if (metadata.enabled === false) continue;
+				const command = scriptToCommand(filePath);
+				const entry: GlossaryEntry = {
+					term: (metadata.term as string | undefined) ?? stem,
+					definition: `{{${command}}}`,
+					source,
+				};
+				if (metadata.aliases !== undefined) entry.aliases = metadata.aliases as string[];
+				if (metadata.pattern !== undefined) entry.pattern = metadata.pattern as string;
+				if (metadata.flags !== undefined) entry.flags = metadata.flags as string;
+				entries.push(validateGlossaryEntry(entry, entries.length));
+			}
+			// Files with other extensions (README, etc.) are silently skipped.
+		} catch (error) {
+			const msg = error instanceof Error ? error.message : String(error);
+			warnings.push(`Failed to load glossary file ${source}: ${msg}`);
+		}
+	}
+
+	return { found: entries.length > 0, entries, path: dirPath, label };
+}
+
 export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 	let entries: CompiledEntry[] = [];
 	let termMap: Map<string, CompiledEntry> = new Map();
@@ -652,19 +800,20 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 		try {
 			const visited = new Set<string>();
 			const warnings: string[] = [];
-			const globalFile = resolveGlossaryFile(path.join(os.homedir(), ".pi", "agent", "glossary"));
-			const projectFile = resolveGlossaryFile(path.join(cwd, ".pi", "glossary"));
-			const globalResult = await loadGlossaryFile(globalFile, cwd, visited, warnings);
-			const projectResult = await loadGlossaryFile(projectFile, cwd, visited, warnings);
+			const globalBase = path.join(os.homedir(), ".pi", "agent", "glossary");
+			const projectBase = path.join(cwd, ".pi", "glossary");
+			const globalJsonResult = await loadGlossaryFile(resolveGlossaryFile(globalBase), cwd, visited, warnings);
+			const globalDirResult = await loadGlossaryDir(globalBase, cwd, visited, warnings);
+			const projectJsonResult = await loadGlossaryFile(resolveGlossaryFile(projectBase), cwd, visited, warnings);
+			const projectDirResult = await loadGlossaryDir(projectBase, cwd, visited, warnings);
 
-			// Merge in reverse so first entry in each file wins (top priority).
-			// Project file is iterated last so it overrides global.
+			// Merge order (later overrides earlier): globalJSON < globalDir < projectJSON < projectDir.
+			// Within each source, first entry wins (hence .reverse() before iterating).
 			const mergedEntries = new Map<string, GlossaryEntry>();
-			for (const entry of [...globalResult.entries].reverse()) {
-				mergedEntries.set(entry.term, entry);
-			}
-			for (const entry of [...projectResult.entries].reverse()) {
-				mergedEntries.set(entry.term, entry);
+			for (const source of [globalJsonResult, globalDirResult, projectJsonResult, projectDirResult]) {
+				for (const entry of [...source.entries].reverse()) {
+					mergedEntries.set(entry.term, entry);
+				}
 			}
 
 			entries = Array.from(mergedEntries.values()).map((entry, index) => {
@@ -682,7 +831,7 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 
 			termMap = new Map(entries.map((e) => [e.term.toLowerCase(), e]));
 
-			const foundFiles = [globalResult, projectResult]
+			const foundFiles = [globalJsonResult, globalDirResult, projectJsonResult, projectDirResult]
 				.filter((result) => result.found)
 				.map((result) => result.label ?? result.path);
 
