@@ -1,5 +1,4 @@
 import { execSync } from "node:child_process";
-import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
@@ -7,20 +6,15 @@ import { CustomEditor } from "@mariozechner/pi-coding-agent";
 import { CURSOR_MARKER, matchesKey, Key, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
 import type { Component, EditorTheme, TUI } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+import type { GlossaryEntry, CompiledEntry } from "./types.ts";
+import { createDefaultGlossaryLoader, describeGlossaryEntry } from "./loader.ts";
 
-type GlossaryEntry = {
-	term: string;
-	definition: string;
-	aliases?: string[];
-	pattern?: string;
-	flags?: string;
-	enabled?: boolean;
-	source?: string;
-};
+export type { GlossaryEntry, CompiledEntry } from "./types.ts";
+export type { GlossaryInclude, GlossarySource, GlossaryParser, RawContent, LoadOptions, LoadResult } from "./loader.ts";
+export { GlossaryLoader, LocalFileSource, HttpSource, JsonParser, JsonlParser, createDefaultGlossaryLoader, validateGlossaryEntry, describeGlossaryEntry } from "./loader.ts";
 
-type CompiledEntry = GlossaryEntry & {
-	matcher: RegExp;
-};
+/** Singleton loader — register custom sources or parsers here before the extension initialises. */
+export const glossaryLoader = createDefaultGlossaryLoader();
 
 const GLOSSARY_HEADING = "## Glossary";
 const GLOSSARY_PREAMBLE = "The user's prompt referenced explicit project glossary handles. Treat the following definitions as authoritative for the rest of this session. Reuse them exactly as project-local language, and do not ask the user to restate them unless the definitions conflict or are ambiguous.";
@@ -399,44 +393,6 @@ class GlossaryOverlay implements Component {
 	}
 }
 
-function describeGlossaryEntry(entry: Partial<GlossaryEntry>, index: number): string {
-	const term = typeof entry.term === "string" ? entry.term.trim() : "";
-	return term ? `entry ${index + 1} (term: ${term})` : `entry ${index + 1}`;
-}
-
-function validateGlossaryEntry(entry: GlossaryEntry, index: number): GlossaryEntry {
-	if (typeof entry.term !== "string" || entry.term.trim().length === 0) {
-		throw new Error(`Invalid glossary ${describeGlossaryEntry(entry, index)}: missing or empty term`);
-	}
-
-	if (typeof entry.definition !== "string" || entry.definition.trim().length === 0) {
-		throw new Error(`Invalid glossary ${describeGlossaryEntry(entry, index)}: missing or empty definition`);
-	}
-
-	if (entry.aliases !== undefined && !Array.isArray(entry.aliases)) {
-		throw new Error(`Invalid glossary ${describeGlossaryEntry(entry, index)}: aliases must be an array of strings`);
-	}
-
-	if (Array.isArray(entry.aliases) && entry.aliases.some((alias) => typeof alias !== "string")) {
-		throw new Error(`Invalid glossary ${describeGlossaryEntry(entry, index)}: aliases must contain only strings`);
-	}
-
-	if (entry.pattern !== undefined && typeof entry.pattern !== "string") {
-		throw new Error(`Invalid glossary ${describeGlossaryEntry(entry, index)}: pattern must be a string`);
-	}
-
-	if (entry.flags !== undefined && typeof entry.flags !== "string") {
-		throw new Error(`Invalid glossary ${describeGlossaryEntry(entry, index)}: flags must be a string`);
-	}
-
-	return {
-		...entry,
-		term: entry.term.trim(),
-		definition: entry.definition.trim(),
-		aliases: entry.aliases?.map((alias) => alias.trim()).filter(Boolean),
-	};
-}
-
 function summarizeGlossarySources(files: string[]): string {
 	if (files.length === 0) {
 		return "";
@@ -445,190 +401,6 @@ function summarizeGlossarySources(files: string[]): string {
 		return ` from ${files[0]}`;
 	}
 	return ` from ${files.join(" and ")}`;
-}
-
-function parseGlossaryFile(raw: string, glossaryFile: string): unknown[] {
-	if (glossaryFile.endsWith(".jsonl")) {
-		return raw
-			.split(/\r?\n/)
-			.map((line, index) => ({ line: line.trim(), lineNumber: index + 1 }))
-			.filter(({ line }) => line.length > 0)
-			.map(({ line, lineNumber }) => {
-				try {
-					return JSON.parse(line) as unknown;
-				} catch (error) {
-					throw new Error(
-						`Invalid glossary file ${glossaryFile}: line ${lineNumber} is not valid JSON (${error instanceof Error ? error.message : String(error)})`,
-					);
-				}
-			});
-	}
-
-	const parsed = JSON.parse(raw) as unknown;
-	if (!Array.isArray(parsed)) {
-		throw new Error(`Invalid glossary file ${glossaryFile}: root value must be an array`);
-	}
-	return parsed;
-}
-
-function resolveGlossaryFile(basePath: string): string {
-	const jsonFile = `${basePath}.json`;
-	const jsonlFile = `${basePath}.jsonl`;
-	const hasJson = fs.existsSync(jsonFile);
-	const hasJsonl = fs.existsSync(jsonlFile);
-
-	if (hasJson && hasJsonl) {
-		throw new Error(`Ambiguous glossary configuration: found both ${jsonFile} and ${jsonlFile}. Keep only one.`);
-	}
-
-	if (hasJsonl) {
-		return jsonlFile;
-	}
-
-	return jsonFile;
-}
-
-type GlossaryInclude = { include: string };
-
-function isIncludeEntry(entry: unknown): entry is GlossaryInclude {
-	return entry !== null && typeof entry === "object" && typeof (entry as any).include === "string";
-}
-
-function isUrl(source: string): boolean {
-	return source.startsWith("http://") || source.startsWith("https://");
-}
-
-function isGitHubUrl(url: string): boolean {
-	return /https?:\/\/(?:raw\.githubusercontent\.com|gist\.githubusercontent\.com|api\.github\.com|github\.com)/.test(url);
-}
-
-/**
- * Convert browser-visible GitHub URLs to their raw/downloadable equivalents so
- * users can paste URLs directly from the GitHub UI without hunting for "Raw".
- *
- * Handled patterns:
- *   github.com/USER/REPO/blob/REF/PATH  → raw.githubusercontent.com/USER/REPO/REF/PATH
- *   github.com/USER/REPO/raw/REF/PATH   → raw.githubusercontent.com/USER/REPO/REF/PATH
- *   gist.github.com/USER/ID/raw/…       → gist.githubusercontent.com/USER/ID/raw/…
- */
-function normalizeGitHubUrl(url: string): string {
-	// File viewer: /blob/ → raw
-	const blobMatch = url.match(/^https?:\/\/github\.com\/([^/]+\/[^/]+)\/blob\/(.+)$/);
-	if (blobMatch) return `https://raw.githubusercontent.com/${blobMatch[1]}/${blobMatch[2]}`;
-
-	// Already-raw github.com link (less common but valid)
-	const rawMatch = url.match(/^https?:\/\/github\.com\/([^/]+\/[^/]+)\/raw\/(.+)$/);
-	if (rawMatch) return `https://raw.githubusercontent.com/${rawMatch[1]}/${rawMatch[2]}`;
-
-	// Gist "Raw" button URL (gist.github.com → gist.githubusercontent.com)
-	const gistRawMatch = url.match(/^https?:\/\/gist\.github\.com\/(.+\/raw\/.+)$/);
-	if (gistRawMatch) return `https://gist.githubusercontent.com/${gistRawMatch[1]}`;
-
-	return url;
-}
-
-function getGitHubToken(): string | null {
-	if (process.env.GITHUB_TOKEN) return process.env.GITHUB_TOKEN;
-	try {
-		const token = execSync("gh auth token", { encoding: "utf8", timeout: 5000 }).trim();
-		return token || null;
-	} catch {
-		return null;
-	}
-}
-
-async function fetchGlossaryUrl(url: string): Promise<string> {
-	const headers: Record<string, string> = {};
-	if (isGitHubUrl(url)) {
-		const token = getGitHubToken();
-		if (token) headers["Authorization"] = `Bearer ${token}`;
-	}
-	const response = await fetch(url, { headers });
-	if (!response.ok) {
-		throw new Error(`HTTP ${response.status} ${response.statusText}`);
-	}
-	return response.text();
-}
-
-/**
- * Expand a flat list of raw parsed items (entries + include directives) into a
- * flat list of validated GlossaryEntry objects. Include directives are resolved
- * in-place: their entries appear at the position of the directive. The caller
- * iterates this list in reverse so the first entry in each file has highest priority.
- *
- * `visited` prevents infinite include cycles. `warnings` collects non-fatal errors.
- * `loadFile` is passed in so this function stays free of circular module-level references.
- */
-async function resolveGlossaryItems(
-	items: unknown[],
-	defaultSource: string,
-	cwd: string,
-	visited: Set<string>,
-	warnings: string[],
-	loadFile: (file: string, cwd: string, visited: Set<string>, warnings: string[]) => Promise<{ found: boolean; entries: GlossaryEntry[]; path: string; label?: string }>,
-): Promise<GlossaryEntry[]> {
-	const result: GlossaryEntry[] = [];
-	let entryCount = 0;
-
-	for (const item of items) {
-		if (isIncludeEntry(item)) {
-			const rawSource = item.include.trim();
-			const source = isUrl(rawSource) ? normalizeGitHubUrl(rawSource) : rawSource;
-			const cycleKey = isUrl(source) ? source : path.resolve(cwd, source);
-
-			if (visited.has(cycleKey)) {
-				warnings.push(`Skipping circular include: ${source}`);
-				continue;
-			}
-			visited.add(cycleKey);
-
-			try {
-				if (isUrl(source)) {
-					const raw = await fetchGlossaryUrl(source);
-					const pseudoFile = source.endsWith(".jsonl") ? "remote.jsonl" : "remote.json";
-					const nested = parseGlossaryFile(raw, pseudoFile);
-					const expanded = await resolveGlossaryItems(nested, source, cwd, visited, warnings, loadFile);
-					result.push(...expanded);
-				} else {
-					const absBase = path.isAbsolute(source) ? source : path.resolve(cwd, source);
-					const hasExtension = absBase.endsWith(".json") || absBase.endsWith(".jsonl");
-					const resolvedPath = hasExtension ? absBase : resolveGlossaryFile(absBase);
-					const fileResult = await loadFile(resolvedPath, cwd, visited, warnings);
-					result.push(...fileResult.entries);
-				}
-			} catch (error) {
-				const msg = error instanceof Error ? error.message : String(error);
-				warnings.push(`Failed to include ${source}: ${msg}`);
-			}
-		} else if (item && typeof item === "object" && (item as GlossaryEntry).enabled !== false) {
-			const validated = validateGlossaryEntry(item as GlossaryEntry, entryCount++);
-			result.push({ ...validated, source: validated.source ?? defaultSource });
-		}
-	}
-
-	return result;
-}
-
-async function loadGlossaryFile(
-	jsonFile: string,
-	cwd: string,
-	visited: Set<string>,
-	warnings: string[],
-): Promise<{ found: boolean; entries: GlossaryEntry[]; path: string; label?: string }> {
-	if (!fs.existsSync(jsonFile)) {
-		return { found: false, entries: [], path: jsonFile };
-	}
-
-	const raw = fs.readFileSync(jsonFile, "utf8");
-	const parsed = parseGlossaryFile(raw, jsonFile);
-
-	const sourceLabel = jsonFile.startsWith(os.homedir())
-		? jsonFile.replace(os.homedir(), "~")
-		: path.relative(cwd, jsonFile);
-
-	const entries = await resolveGlossaryItems(parsed, sourceLabel, cwd, visited, warnings, loadGlossaryFile);
-
-	return { found: true, entries, path: jsonFile, label: sourceLabel };
 }
 
 export default function lazyGlossaryExtension(pi: ExtensionAPI) {
@@ -652,10 +424,10 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 		try {
 			const visited = new Set<string>();
 			const warnings: string[] = [];
-			const globalFile = resolveGlossaryFile(path.join(os.homedir(), ".pi", "agent", "glossary"));
-			const projectFile = resolveGlossaryFile(path.join(cwd, ".pi", "glossary"));
-			const globalResult = await loadGlossaryFile(globalFile, cwd, visited, warnings);
-			const projectResult = await loadGlossaryFile(projectFile, cwd, visited, warnings);
+			const globalBase = path.join(os.homedir(), ".pi", "agent", "glossary");
+			const projectBase = path.join(cwd, ".pi", "glossary");
+			const globalResult = await glossaryLoader.load(globalBase, { cwd, visited, warnings });
+			const projectResult = await glossaryLoader.load(projectBase, { cwd, visited, warnings });
 
 			// Merge in reverse so first entry in each file wins (top priority).
 			// Project file is iterated last so it overrides global.
@@ -682,9 +454,14 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 
 			termMap = new Map(entries.map((e) => [e.term.toLowerCase(), e]));
 
+			const makeRelative = (label: string) =>
+				path.isAbsolute(label) && label.startsWith(cwd + path.sep)
+					? path.relative(cwd, label)
+					: label;
+
 			const foundFiles = [globalResult, projectResult]
-				.filter((result) => result.found)
-				.map((result) => result.label ?? result.path);
+				.filter((r) => r.found)
+				.map((r) => makeRelative(r.label));
 
 			return {
 				found: foundFiles.length > 0,

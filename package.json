@@ -25,6 +25,8 @@
   },
   "files": [
     "index.ts",
+    "types.ts",
+    "loader.ts",
     "glossary.json",
     "README.md"
   ],
