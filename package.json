@@ -21,6 +21,7 @@
     "extension"
   ],
   "scripts": {
+    "test": "node --experimental-strip-types --test loader.test.ts",
     "postinstall": "node scripts/install-default-glossary.js"
   },
   "files": [
