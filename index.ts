@@ -175,10 +175,17 @@ async function expandTemplate(definition: string, cwd: string): Promise<string> 
 		if (results.has(command)) continue;
 		let output: string;
 		try {
-			output = execSync(command, { cwd, encoding: "utf8", timeout: 5000 }).trim();
+			output = execSync(command, {
+				cwd,
+				encoding: "utf8",
+				timeout: 5000,
+				stdio: ["ignore", "pipe", "pipe"],
+			}).trim();
 		} catch (error) {
+			// execSync hides stderr in error.message, which is the part that explains the failure.
+			const stderr = String((error as { stderr?: unknown })?.stderr ?? "").trim();
 			const msg = error instanceof Error ? error.message.split("\n")[0] : String(error);
-			output = `[error: ${msg}]`;
+			output = `[error: ${stderr || msg}]`;
 		}
 		results.set(command, output);
 	}
