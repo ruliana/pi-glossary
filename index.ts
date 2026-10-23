@@ -612,6 +612,13 @@ async function fetchGlossaryUrl(url: string, withToken: boolean): Promise<string
 	if (!response.ok) {
 		throw new Error(`HTTP ${response.status} ${response.statusText}`);
 	}
+	// A login wall (SSO, IAP) answers 200 with an HTML page, which would otherwise fail as bad JSON.
+	if ((response.headers.get("content-type") ?? "").includes("text/html")) {
+		const landed = response.redirected ? new URL(response.url).host : "";
+		throw new Error(
+			`got an HTML page instead of a glossary${landed ? ` (redirected to ${landed})` : ""}; the URL probably needs a login, which glossary includes cannot do`,
+		);
+	}
 	// Read at most MAX_REMOTE_BYTES so a huge response cannot exhaust memory.
 	const reader = response.body?.getReader();
 	if (!reader) return "";

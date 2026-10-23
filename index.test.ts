@@ -246,6 +246,17 @@ describe("terminal escapes", () => {
 });
 
 describe("remote fetches", () => {
+	test("an HTML login page is reported as such, not as bad JSON", async () => {
+		writeGlobal([{ include: "https://example.com/sso.json" }]);
+		const loginPage = "<!doctype html><title>Sign in</title>";
+		globalThis.fetch = (async () => new Response(loginPage, { headers: { "content-type": "text/html; charset=utf-8" } })) as typeof fetch;
+		const g = await start();
+
+		const warning = g.notes.find((n) => n.msg.includes("Failed to include https://example.com/sso.json"));
+		expect(warning?.msg).toContain("got an HTML page instead of a glossary");
+		expect(warning?.msg).not.toContain("not valid JSON");
+	});
+
 	test("have a timeout and a size limit", async () => {
 		urls["https://example.com/big.json"] = JSON.stringify([{ term: "big", definition: "x".repeat(2 * 1024 * 1024) }]);
 		urls["https://example.com/ok.json"] = JSON.stringify([{ term: "ok", definition: "fine" }]);
