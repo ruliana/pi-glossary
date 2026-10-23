@@ -533,7 +533,7 @@ function resolveGlossaryFile(basePath: string): string {
 	return jsonFile;
 }
 
-type GlossaryInclude = { include: string; allowShell?: unknown; allowPatterns?: unknown };
+type GlossaryInclude = { include: string };
 
 function isIncludeEntry(entry: unknown): entry is GlossaryInclude {
 	return entry !== null && typeof entry === "object" && typeof (entry as any).include === "string";
@@ -634,8 +634,8 @@ type LoadedFile = { found: boolean; entries: GlossaryEntry[]; path: string; labe
 
 /**
  * `trusted`: entries may run shell templates. True for the user's own glossary files and
- * local includes reached from them; false below a remote include unless that include
- * (written in a trusted file) opts in with `"allowShell": true`. Trust never widens.
+ * local includes reached from them; always false below a URL include, local files it
+ * includes too. Nothing in a file can change it.
  */
 type LoadCtx = {
 	cwd: string;
@@ -644,12 +644,6 @@ type LoadCtx = {
 	/** Collects non-fatal errors. */
 	warnings: string[];
 	trusted: boolean;
-	/**
-	 * Entries below a URL include may use their own `pattern`. A pattern runs on every keystroke
-	 * and prompt, so a hostile one (catastrophic backtracking) could freeze pi; a remote file gets
-	 * this only when its include, written in a local file, sets `"allowPatterns": true`.
-	 */
-	allowPatterns: boolean;
 	/** Origin of the file being read; becomes "remote" below a URL include and never changes back. */
 	origin: GlossaryOrigin;
 };
@@ -681,15 +675,8 @@ async function resolveGlossaryItems(items: unknown[], defaultSource: string, ctx
 					const raw = await fetchGlossaryUrl(source, ctx.origin === "global");
 					const pseudoFile = source.endsWith(".jsonl") ? "remote.jsonl" : "remote.json";
 					const nested = parseGlossaryFile(raw, pseudoFile);
-					// Over plain http anyone on the network path could rewrite the file, so the opt-in needs https.
-					const overHttp = !source.startsWith("https://");
-					if (item.allowShell === true && overHttp) {
-						ctx.warnings.push(`Ignoring allowShell on ${source}: shell templates need an https URL`);
-					}
-					// Only an include written in a local file can grant this, never one inside a remote file.
-					const trusted = ctx.trusted && ctx.origin !== "remote" && item.allowShell === true && !overHttp;
-					const allowPatterns = ctx.origin !== "remote" && item.allowPatterns === true;
-					result.push(...(await resolveGlossaryItems(nested, source, { ...ctx, trusted, allowPatterns, origin: "remote" })));
+					// Remote glossaries never run shell templates.
+					result.push(...(await resolveGlossaryItems(nested, source, { ...ctx, trusted: false, origin: "remote" })));
 				} else {
 					const absBase = path.isAbsolute(source) ? source : path.resolve(ctx.cwd, source);
 					const hasExtension = absBase.endsWith(".json") || absBase.endsWith(".jsonl");
@@ -703,12 +690,6 @@ async function resolveGlossaryItems(items: unknown[], defaultSource: string, ctx
 			}
 		} else if (item && typeof item === "object" && (item as GlossaryEntry).enabled !== false) {
 			const validated = validateGlossaryEntry(item as GlossaryEntry, entryCount++);
-			if (ctx.origin === "remote" && !ctx.allowPatterns && validated.pattern !== undefined) {
-				ctx.warnings.push(
-					`Ignoring pattern on remote entry "${validated.term}" from ${defaultSource}; matching its term and aliases instead (set "allowPatterns": true on the include to use it)`,
-				);
-				delete validated.pattern;
-			}
 			// Any `source` in the file is ignored, so a remote file cannot pass itself off as one of the user's files.
 			result.push({ ...validated, source: defaultSource, allowShell: ctx.trusted, origin: ctx.origin });
 		}
@@ -757,7 +738,7 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 			const warnings: string[] = [];
 			const globalFile = resolveGlossaryFile(path.join(os.homedir(), ".pi", "agent", "glossary"));
 			const projectFile = resolveGlossaryFile(path.join(cwd, ".pi", "glossary"));
-			const ctx = { cwd, visited, warnings, trusted: true, allowPatterns: true };
+			const ctx = { cwd, visited, warnings, trusted: true };
 			const globalResult = await loadGlossaryFile(globalFile, { ...ctx, origin: "global" });
 			const projectResult = await loadGlossaryFile(projectFile, { ...ctx, origin: "project" });
 
