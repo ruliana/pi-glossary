@@ -123,7 +123,10 @@ Browser-visible GitHub URLs (the `/blob/` variant and the gist Raw button URL) a
 - Circular includes (A includes B which includes A) are detected and skipped with a warning.
 - A failed include (file not found, network error, parse error) is reported as a warning and skipped — other entries still load.
 - Included files may themselves contain `include` directives (recursive).
-- GitHub URLs (raw files, gists) are fetched with authentication: `GITHUB_TOKEN` env var is tried first; if absent, the `gh` CLI's stored credentials are used (`gh auth token`). Private gists work as long as either is available.
+- GitHub URLs (raw files, gists) are fetched with authentication: `GITHUB_TOKEN` env var is tried first; if absent, the `gh` CLI's stored credentials are used (`gh auth token`). Private gists work as long as either is available. The token is sent only over `https`, only when the URL's host is exactly `github.com`, `api.github.com`, `raw.githubusercontent.com` or `gist.githubusercontent.com`, and only for includes written in the global glossary (or a local file it includes). Includes in a project glossary or inside a remote glossary are fetched without it, so a repository or a remote file cannot read your private GitHub content.
+- Entries from a URL include cannot run [shell command templates](#shell-command-templates) unless the include opts in with `"allowShell": true` (see below).
+- Definitions from a URL include are injected with a note that the user did not write them and that they are reference only, not instructions.
+- A remote entry whose `pattern` or `flags` do not compile is skipped with a warning; the same error in your own files is a load error.
 
 ## Glossary Entry Fields
 
@@ -135,7 +138,6 @@ Browser-visible GitHub URLs (the `/blob/` variant and the gist Raw button URL) a
 | `pattern` | No | Explicit regex trigger; overrides the default matcher |
 | `flags` | No | Regex flags, defaults to `iu` |
 | `enabled` | No | Set to `false` to disable an entry |
-| `source` | No | Descriptive provenance string shown in the glossary browser; not included in injected context |
 
 ## Shell Command Templates
 
@@ -159,6 +161,14 @@ The current branch in /home/user/myproject is feat/new-login.
 - Each distinct command in a definition runs at most once per injection.
 - If a command exits with an error or times out (5 s limit), the placeholder is replaced with `[error: <message>]` rather than stopping the injection.
 - The `/glossary` browse overlay shows the raw template text (unexpanded), since expansion happens at agent-start time.
+- Templates run only for entries from your own glossary files and the local files they include. Entries that come from a URL include (directly or through anything it includes) are not expanded: each placeholder becomes `[shell template disabled: remote glossary source]`.
+- To let a remote glossary you trust run its templates, add `"allowShell": true` to the include in your own file. It needs an `https` URL (on `http` it is ignored with a warning), and only an include written in a local glossary can grant it; a remote glossary cannot grant it to itself or to what it includes:
+
+```json
+{ "include": "https://raw.githubusercontent.com/org/repo/main/glossary.json", "allowShell": true }
+```
+
+Anyone who can change that URL's content can then run commands on your machine whenever a matching term is mentioned, so opt in only for sources you control.
 
 ## Validation
 

@@ -21,7 +21,8 @@
     "extension"
   ],
   "scripts": {
-    "postinstall": "node scripts/install-default-glossary.js"
+    "postinstall": "node scripts/install-default-glossary.js",
+    "test": "bun test"
   },
   "files": [
     "index.ts",
