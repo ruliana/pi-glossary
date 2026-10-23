@@ -108,32 +108,23 @@ async function start() {
 }
 
 describe("remote glossaries", () => {
-	test("cannot run shell templates unless a local https include opts in", async () => {
-		urls["https://example.com/plain.json"] = JSON.stringify([{ term: "plain", definition: "p {{echo RAN-plain}}" }]);
-		urls["https://example.com/opted.json"] = JSON.stringify([
-			{ term: "opted", definition: "o {{echo RAN-opted}}", allowShell: false },
-			// A remote file cannot widen trust for what it includes.
-			{ include: "https://example.com/nested.json", allowShell: true },
+	test("never run shell templates, even when an include asks to", async () => {
+		urls["https://example.com/plain.json"] = JSON.stringify([
+			{ term: "plain", definition: "p {{echo RAN-plain}}", allowShell: true },
+			{ include: "local.json" },
 		]);
-		urls["https://example.com/nested.json"] = JSON.stringify([{ term: "nested", definition: "n {{echo RAN-nested}}" }]);
-		urls["http://example.com/http.json"] = JSON.stringify([{ term: "overhttp", definition: "h {{echo RAN-http}}" }]);
+		fs.writeFileSync(path.join(cwd, "local.json"), JSON.stringify([{ term: "below", definition: "b {{echo RAN-below}}" }]));
 		writeGlobal([
 			{ term: "mine", definition: "m {{echo RAN-mine}}" },
-			{ include: "https://example.com/plain.json" },
-			{ include: "https://example.com/opted.json", allowShell: true },
-			{ include: "http://example.com/http.json", allowShell: true },
+			{ include: "https://example.com/plain.json", allowShell: true },
 		]);
 		const g = await start();
 
-		const out = await g.prompt("mine plain opted nested overhttp");
+		const out = await g.prompt("mine plain below");
 		expect(out).toContain("m RAN-mine");
-		expect(out).toContain("o RAN-opted");
 		expect(out).not.toContain("RAN-plain");
-		expect(out).not.toContain("RAN-nested");
-		expect(out).not.toContain("RAN-http");
+		expect(out).not.toContain("RAN-below");
 		expect(out).toContain("p [shell template disabled: remote glossary source]");
-		expect(g.notes.some((n) => n.msg.includes("Ignoring allowShell on http://example.com/http.json"))).toBe(true);
-
 		expect(await g.lookup("plain")).not.toContain("RAN-plain");
 	});
 
@@ -166,7 +157,7 @@ describe("remote glossaries", () => {
 			{ term: "broken", definition: "b", pattern: "(" },
 			{ term: "fine", definition: "f" },
 		]);
-		writeGlobal([{ term: "local", definition: "l" }, { include: "https://example.com/r.json", allowPatterns: true }]);
+		writeGlobal([{ term: "local", definition: "l" }, { include: "https://example.com/r.json" }]);
 		const g = await start();
 
 		const out = await g.prompt("local fine");
@@ -218,26 +209,14 @@ describe("GitHub token", () => {
 });
 
 describe("remote patterns", () => {
-	test("are ignored unless a local include sets allowPatterns", async () => {
-		const entry = { term: "sneaky", definition: "always on", pattern: "(?:)" };
-		urls["https://example.com/plain.json"] = JSON.stringify([entry]);
-		urls["https://example.com/opted.json"] = JSON.stringify([
-			{ ...entry, term: "opted", pattern: "zzz-opted" },
-			// A remote file cannot grant this to what it includes.
-			{ include: "https://example.com/nested.json", allowPatterns: true },
-		]);
-		urls["https://example.com/nested.json"] = JSON.stringify([{ ...entry, term: "nested" }]);
-		writeGlobal([
-			{ include: "https://example.com/plain.json" },
-			{ include: "https://example.com/opted.json", allowPatterns: true },
-		]);
+	test("are used as written", async () => {
+		urls["https://example.com/r.json"] = JSON.stringify([{ term: "shared", definition: "s", pattern: "zzz-shared" }]);
+		writeGlobal([{ include: "https://example.com/r.json" }]);
 		const g = await start();
 
-		expect(await g.prompt("an unrelated prompt")).toBe("");
-		expect(g.notes.some((n) => n.msg.includes('Ignoring pattern on remote entry "sneaky"'))).toBe(true);
-		const out = await g.prompt("sneaky zzz-opted");
-		expect(out).toContain("### `sneaky`");
-		expect(out).toContain("### `opted`");
+		expect(await g.prompt("shared")).toBe("");
+		expect(await g.prompt("zzz-shared")).toContain("### `shared`");
+		expect(g.notes.filter((n) => n.level === "warning")).toEqual([]);
 	});
 });
 
