@@ -21,11 +21,13 @@
     "extension"
   ],
   "scripts": {
-    "postinstall": "node scripts/install-default-glossary.js"
+    "postinstall": "node scripts/install-default-glossary.js",
+    "test": "bun test"
   },
   "files": [
     "index.ts",
     "glossary.json",
+    "scripts/",
     "README.md"
   ],
   "pi": {
