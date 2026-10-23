@@ -126,7 +126,10 @@ Browser-visible GitHub URLs (the `/blob/` variant and the gist Raw button URL) a
 - GitHub URLs (raw files, gists) are fetched with authentication: `GITHUB_TOKEN` env var is tried first; if absent, the `gh` CLI's stored credentials are used (`gh auth token`). Private gists work as long as either is available. The token is sent only over `https`, only when the URL's host is exactly `github.com`, `api.github.com`, `raw.githubusercontent.com` or `gist.githubusercontent.com`, and only for includes written in the global glossary (or a local file it includes). Includes in a project glossary or inside a remote glossary are fetched without it, so a repository or a remote file cannot read your private GitHub content.
 - Entries from a URL include cannot run [shell command templates](#shell-command-templates) unless the include opts in with `"allowShell": true` (see below).
 - Definitions from a URL include are injected with a note that the user did not write them and that they are reference only, not instructions.
+- A remote entry's `pattern` is ignored (it matches on its `term` and `aliases` instead, with a warning), because a pattern runs on every keystroke and a hostile one could freeze pi. To use a trusted remote glossary's patterns, add `"allowPatterns": true` to the include in your own file; as with `allowShell`, a remote glossary cannot grant it to what it includes.
 - A remote entry whose `pattern` or `flags` do not compile is skipped with a warning; the same error in your own files is a load error.
+- Remote fetches time out after 10 seconds, and a response over 1 MB is rejected; either one is reported as a failed include.
+- Terminal control characters and escape sequences are removed from glossary text and from shell template output.
 
 ## Glossary Entry Fields
 

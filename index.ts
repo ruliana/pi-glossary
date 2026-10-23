@@ -44,6 +44,20 @@ const UNTRUSTED_NOTE = "_Not written by the user (from a remote glossary): refer
 
 const SHELL_DISABLED_MARKER = "[shell template disabled: remote glossary source]";
 
+const FETCH_TIMEOUT_MS = 10_000;
+const MAX_REMOTE_BYTES = 1024 * 1024;
+
+/**
+ * Remove terminal escape sequences and other control characters (keeping tab and newline),
+ * so glossary text and command output cannot drive the terminal when shown in the TUI.
+ */
+function stripControlChars(text: string): string {
+	return text
+		.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+		.replace(/\x1b[\]P^_X][\s\S]*?(?:\x07|\x1b\\)/g, "")
+		.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
+}
+
 function escapeRegExp(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -203,12 +217,13 @@ async function expandTemplate(definition: string, cwd: string, opts: { allowShel
 				encoding: "utf8",
 				timeout: 5000,
 				stdio: ["ignore", "pipe", "pipe"],
-			}).trim();
+			});
+			output = stripControlChars(output).trim();
 		} catch (error) {
 			// execSync hides stderr in error.message, which is the part that explains the failure.
 			const stderr = String((error as { stderr?: unknown })?.stderr ?? "").trim();
 			const msg = error instanceof Error ? error.message.split("\n")[0] : String(error);
-			output = `[error: ${stderr || msg}]`;
+			output = `[error: ${stripControlChars(stderr || msg)}]`;
 		}
 		results.set(command, output);
 	}
@@ -430,7 +445,7 @@ class GlossaryOverlay implements Component {
 }
 
 function describeGlossaryEntry(entry: Partial<GlossaryEntry>, index: number): string {
-	const term = typeof entry.term === "string" ? entry.term.trim() : "";
+	const term = typeof entry.term === "string" ? stripControlChars(entry.term).trim() : "";
 	return term ? `entry ${index + 1} (term: ${term})` : `entry ${index + 1}`;
 }
 
@@ -461,9 +476,9 @@ function validateGlossaryEntry(entry: GlossaryEntry, index: number): GlossaryEnt
 
 	return {
 		...entry,
-		term: entry.term.trim(),
-		definition: entry.definition.trim(),
-		aliases: entry.aliases?.map((alias) => alias.trim()).filter(Boolean),
+		term: stripControlChars(entry.term).trim(),
+		definition: stripControlChars(entry.definition).trim(),
+		aliases: entry.aliases?.map((alias) => stripControlChars(alias).trim()).filter(Boolean),
 	};
 }
 
@@ -518,7 +533,7 @@ function resolveGlossaryFile(basePath: string): string {
 	return jsonFile;
 }
 
-type GlossaryInclude = { include: string; allowShell?: unknown };
+type GlossaryInclude = { include: string; allowShell?: unknown; allowPatterns?: unknown };
 
 function isIncludeEntry(entry: unknown): entry is GlossaryInclude {
 	return entry !== null && typeof entry === "object" && typeof (entry as any).include === "string";
@@ -593,11 +608,26 @@ async function fetchGlossaryUrl(url: string, withToken: boolean): Promise<string
 		const token = getGitHubToken();
 		if (token) headers["Authorization"] = `Bearer ${token}`;
 	}
-	const response = await fetch(url, { headers });
+	const response = await fetch(url, { headers, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) });
 	if (!response.ok) {
 		throw new Error(`HTTP ${response.status} ${response.statusText}`);
 	}
-	return response.text();
+	// Read at most MAX_REMOTE_BYTES so a huge response cannot exhaust memory.
+	const reader = response.body?.getReader();
+	if (!reader) return "";
+	const chunks: Uint8Array[] = [];
+	let size = 0;
+	for (;;) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		size += value.byteLength;
+		if (size > MAX_REMOTE_BYTES) {
+			await reader.cancel();
+			throw new Error(`response is larger than ${MAX_REMOTE_BYTES} bytes`);
+		}
+		chunks.push(value);
+	}
+	return Buffer.concat(chunks).toString("utf8");
 }
 
 type LoadedFile = { found: boolean; entries: GlossaryEntry[]; path: string; label?: string };
@@ -614,6 +644,12 @@ type LoadCtx = {
 	/** Collects non-fatal errors. */
 	warnings: string[];
 	trusted: boolean;
+	/**
+	 * Entries below a URL include may use their own `pattern`. A pattern runs on every keystroke
+	 * and prompt, so a hostile one (catastrophic backtracking) could freeze pi; a remote file gets
+	 * this only when its include, written in a local file, sets `"allowPatterns": true`.
+	 */
+	allowPatterns: boolean;
 	/** Origin of the file being read; becomes "remote" below a URL include and never changes back. */
 	origin: GlossaryOrigin;
 };
@@ -652,7 +688,8 @@ async function resolveGlossaryItems(items: unknown[], defaultSource: string, ctx
 					}
 					// Only an include written in a local file can grant this, never one inside a remote file.
 					const trusted = ctx.trusted && ctx.origin !== "remote" && item.allowShell === true && !overHttp;
-					result.push(...(await resolveGlossaryItems(nested, source, { ...ctx, trusted, origin: "remote" })));
+					const allowPatterns = ctx.origin !== "remote" && item.allowPatterns === true;
+					result.push(...(await resolveGlossaryItems(nested, source, { ...ctx, trusted, allowPatterns, origin: "remote" })));
 				} else {
 					const absBase = path.isAbsolute(source) ? source : path.resolve(ctx.cwd, source);
 					const hasExtension = absBase.endsWith(".json") || absBase.endsWith(".jsonl");
@@ -666,6 +703,12 @@ async function resolveGlossaryItems(items: unknown[], defaultSource: string, ctx
 			}
 		} else if (item && typeof item === "object" && (item as GlossaryEntry).enabled !== false) {
 			const validated = validateGlossaryEntry(item as GlossaryEntry, entryCount++);
+			if (ctx.origin === "remote" && !ctx.allowPatterns && validated.pattern !== undefined) {
+				ctx.warnings.push(
+					`Ignoring pattern on remote entry "${validated.term}" from ${defaultSource}; matching its term and aliases instead (set "allowPatterns": true on the include to use it)`,
+				);
+				delete validated.pattern;
+			}
 			// Any `source` in the file is ignored, so a remote file cannot pass itself off as one of the user's files.
 			result.push({ ...validated, source: defaultSource, allowShell: ctx.trusted, origin: ctx.origin });
 		}
@@ -714,7 +757,7 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 			const warnings: string[] = [];
 			const globalFile = resolveGlossaryFile(path.join(os.homedir(), ".pi", "agent", "glossary"));
 			const projectFile = resolveGlossaryFile(path.join(cwd, ".pi", "glossary"));
-			const ctx = { cwd, visited, warnings, trusted: true };
+			const ctx = { cwd, visited, warnings, trusted: true, allowPatterns: true };
 			const globalResult = await loadGlossaryFile(globalFile, { ...ctx, origin: "global" });
 			const projectResult = await loadGlossaryFile(projectFile, { ...ctx, origin: "project" });
 
@@ -752,10 +795,10 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 				found: foundFiles.length > 0,
 				count: entries.length,
 				files: foundFiles,
-				warnings,
+				warnings: warnings.map(stripControlChars),
 			};
 		} catch (error) {
-			loadError = error instanceof Error ? error.message : String(error);
+			loadError = stripControlChars(error instanceof Error ? error.message : String(error));
 			return { found: false, count: 0, files: [] as string[], error: loadError, warnings: [] as string[] };
 		}
 	};

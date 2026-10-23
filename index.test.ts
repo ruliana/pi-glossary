@@ -22,7 +22,7 @@ beforeAll(async () => {
 	extension = (await import("./index")).default;
 });
 
-type Fetched = { url: string; headers: Record<string, string> };
+type Fetched = { url: string; headers: Record<string, string>; signal?: AbortSignal };
 
 let home: string;
 let cwd: string;
@@ -40,9 +40,9 @@ beforeEach(() => {
 	process.env.GITHUB_TOKEN = "secret-token";
 	fetched = [];
 	urls = {};
-	globalThis.fetch = (async (input: string, init?: { headers?: Record<string, string> }) => {
+	globalThis.fetch = (async (input: string, init?: { headers?: Record<string, string>; signal?: AbortSignal }) => {
 		const url = String(input);
-		fetched.push({ url, headers: { ...(init?.headers ?? {}) } });
+		fetched.push({ url, headers: { ...(init?.headers ?? {}) }, signal: init?.signal });
 		const body = urls[url];
 		return body === undefined
 			? new Response("not found", { status: 404, statusText: "Not Found" })
@@ -166,7 +166,7 @@ describe("remote glossaries", () => {
 			{ term: "broken", definition: "b", pattern: "(" },
 			{ term: "fine", definition: "f" },
 		]);
-		writeGlobal([{ term: "local", definition: "l" }, { include: "https://example.com/r.json" }]);
+		writeGlobal([{ term: "local", definition: "l" }, { include: "https://example.com/r.json", allowPatterns: true }]);
 		const g = await start();
 
 		const out = await g.prompt("local fine");
@@ -214,5 +214,67 @@ describe("GitHub token", () => {
 		expect(auth(remote)).toBe("Bearer secret-token");
 		expect(auth(fromRemote)).toBeUndefined();
 		expect(auth(fromProject)).toBeUndefined();
+	});
+});
+
+describe("remote patterns", () => {
+	test("are ignored unless a local include sets allowPatterns", async () => {
+		const entry = { term: "sneaky", definition: "always on", pattern: "(?:)" };
+		urls["https://example.com/plain.json"] = JSON.stringify([entry]);
+		urls["https://example.com/opted.json"] = JSON.stringify([
+			{ ...entry, term: "opted", pattern: "zzz-opted" },
+			// A remote file cannot grant this to what it includes.
+			{ include: "https://example.com/nested.json", allowPatterns: true },
+		]);
+		urls["https://example.com/nested.json"] = JSON.stringify([{ ...entry, term: "nested" }]);
+		writeGlobal([
+			{ include: "https://example.com/plain.json" },
+			{ include: "https://example.com/opted.json", allowPatterns: true },
+		]);
+		const g = await start();
+
+		expect(await g.prompt("an unrelated prompt")).toBe("");
+		expect(g.notes.some((n) => n.msg.includes('Ignoring pattern on remote entry "sneaky"'))).toBe(true);
+		const out = await g.prompt("sneaky zzz-opted");
+		expect(out).toContain("### `sneaky`");
+		expect(out).toContain("### `opted`");
+	});
+});
+
+describe("terminal escapes", () => {
+	test("are stripped from glossary text, command output and warnings", async () => {
+		const esc = "\x1b]52;c;cHduZWQ=\x07\x1b[31m";
+		urls["https://example.com/r.json"] = JSON.stringify([
+			{ term: `evil${esc}`, aliases: [`al${esc}`], definition: `bad${esc} text\nline two` },
+		]);
+		urls["https://example.com/broken.json"] = JSON.stringify([{ term: `broken${esc}`, definition: "b", aliases: "no" }]);
+		writeGlobal([
+			{ term: "colors", definition: "out: {{printf '\\033[31mred\\033[0m\\033]0;title\\007'}}" },
+			{ include: "https://example.com/r.json" },
+			{ include: "https://example.com/broken.json" },
+		]);
+		const g = await start();
+
+		const out = await g.prompt("evil colors");
+		expect(out).not.toContain("\x1b");
+		expect(out).toContain("### `evil`");
+		expect(out).toContain("bad text\nline two");
+		expect(out).toContain("out: red");
+		expect(g.notes.length).toBeGreaterThan(0);
+		for (const n of g.notes) expect(n.msg).not.toContain("\x1b");
+		expect((await g.browse()).join("\n")).not.toContain("\x1b");
+	});
+});
+
+describe("remote fetches", () => {
+	test("have a timeout and a size limit", async () => {
+		urls["https://example.com/big.json"] = JSON.stringify([{ term: "big", definition: "x".repeat(2 * 1024 * 1024) }]);
+		urls["https://example.com/ok.json"] = JSON.stringify([{ term: "ok", definition: "fine" }]);
+		writeGlobal([{ include: "https://example.com/big.json" }, { include: "https://example.com/ok.json" }]);
+		const g = await start();
+
+		expect(fetched.every((f) => f.signal instanceof AbortSignal)).toBe(true);
+		expect(g.notes.some((n) => n.msg.includes("Failed to include https://example.com/big.json: response is larger than"))).toBe(true);
+		expect(await g.prompt("big ok")).toContain("### `ok`");
 	});
 });
