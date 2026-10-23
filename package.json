@@ -27,6 +27,7 @@
   "files": [
     "index.ts",
     "glossary.json",
+    "scripts/",
     "README.md"
   ],
   "pi": {
