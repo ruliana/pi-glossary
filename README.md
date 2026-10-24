@@ -15,7 +15,8 @@ More about it in [this blog post](https://ronie.medium.com/agent-glossary-teachi
 3. Project entries override global entries when they use the same `term`. Within a file, **earlier entries (top) take priority** over later ones.
 4. Before an agent starts, it scans the user's prompt for all matching glossary terms, aliases, or explicit regex patterns.
 5. If one or more terms match, only terms not already loaded in the current session are appended as a user-level context message (custom type `glossary`) immediately after the user's message, before the agent starts. The first injected message includes guidance for interpreting glossary definitions; later injected messages include only the `## Glossary` heading and new term definitions.
-6. Loaded glossary handles stay visible for the rest of the session in the footer status as `Glossary: term, term`.
+6. Loaded glossary handles stay visible in the footer status as `Glossary: term, term`.
+7. When a compaction summarizes away a term's definition (its injected message or `glossary_lookup` result), the term counts as not loaded again, so its next mention injects the definition once more. Definitions the compaction keeps stay loaded.
 
 ## What It Does
 
@@ -205,7 +206,7 @@ Any other form, such as `/glossary something`, shows a usage hint instead of doi
 
 - The extension is user-scoped, and glossary data can be global (`~/.pi/agent/glossary.json` or `~/.pi/agent/glossary.jsonl`) or project-scoped (`.pi/glossary.json` or `.pi/glossary.jsonl`).
 - Nothing is injected when the prompt does not mention a glossary handle.
-- Once a term is loaded in a session, mentioning it again does not inject it again.
+- Once a term is loaded in a session, mentioning it again does not inject it again, until a compaction drops its definition from the context.
 - If you edit the extension itself, run `/reload`.
 - If you edit any glossary file (`glossary.json` or `glossary.jsonl`), run `/glossary reload`.
 
