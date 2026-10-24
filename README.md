@@ -21,6 +21,7 @@ More about it in [this blog post](https://ronie.medium.com/agent-glossary-teachi
 
 - Loads glossary entries from project-scoped `.pi/glossary.json` or `.pi/glossary.jsonl`
 - Supports `{"include": "path_or_url"}` entries to pull in remote or local glossaries inline
+- Fetches private or login-protected includes with a program you configure, such as `gh` (see [Fetchers](#fetchers-for-private-sources))
 - Matches canonical terms and optional aliases out of the box
 - Supports custom regex triggers per entry
 - Expands `{{shell command}}` placeholders in definitions at injection time
@@ -129,6 +130,45 @@ Browser-visible GitHub URLs (the `/blob/` variant and the gist Raw button URL) a
 - A remote entry whose `pattern` or `flags` do not compile is skipped with a warning; the same error in your own files is a load error.
 - Remote fetches time out after 10 seconds, and a response over 1 MB is rejected; either one is reported as a failed include.
 - Terminal control characters and escape sequences are removed from glossary text and from shell template output.
+
+## Fetchers for private sources
+
+A plain GET cannot reach everything: a private gist, a file in a private repo, or a host behind SSO or Google IAP (which answers with a login page). For those, tell pi-glossary to run a program you choose instead. Put the fetchers in `~/.pi/agent/glossary-fetchers.json`:
+
+```json
+[
+  {
+    "name": "my gists",
+    "match": "^https://gist\\.github\\.com/ruliana/(?<id>[0-9a-f]{20,32})$",
+    "command": ["gh", "gist", "view", "{id}", "--raw", "--filename", "glossary.json"]
+  },
+  {
+    "name": "team glossary behind IAP",
+    "match": "^https://glossary\\.example\\.com/(?<file>[a-z0-9][a-z0-9-]{0,63})\\.json$",
+    "command": ["~/bin/iap-glossary-fetch", "{url}"],
+    "scopes": ["global", "project"]
+  }
+]
+```
+
+For each URL include, the first fetcher whose `match` accepts the whole URL, exactly as written, runs `command` and reads the glossary from its stdout. URLs no fetcher matches are fetched as before.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `match` | Yes | Regex for the whole URL (it is wrapped in `^(?:…)$`). |
+| `command` | Yes | Program and arguments, run directly without a shell, from your home directory. The program is a name on `PATH`, an absolute path, or `~/…`. `{url}`, `{1}` and `{name}` are filled from the match; with no placeholder, the URL is appended. A filled-in argument that would start with `-` is refused. |
+| `name` | No | Shown in warnings. |
+| `scopes` | No | Where the include must be written for the fetcher to run: `global` (your global glossary and local files it includes), `project`, `remote` (inside a fetched glossary). Defaults to `["global"]`; a matching include elsewhere fails with a warning. |
+| `timeoutMs` | No | Default 10000, at most 60000. |
+| `format` | No | `json` or `jsonl`; by default `jsonl` when the URL ends in `.jsonl`. |
+
+**Rules:**
+- Fetchers come only from `~/.pi/agent/glossary-fetchers.json`. A project or a remote glossary cannot add one or change which program runs; a `glossary-fetchers.json` in a project's `.pi/` is ignored.
+- What a fetcher returns is still a remote glossary: it never runs shell templates and is marked as not written by you.
+- Output over 1 MB, a timeout, or a non-zero exit fails that include with a warning showing the first line of stderr.
+- A broken `glossary-fetchers.json` is a load error, like a broken glossary file.
+
+The package ships two skills for this: **glossary-fetcher-setup** (writing the config and safe URL regexes) and **glossary-fetcher-build** (writing a safe fetch or sanitize script, with a Google IAP example). Ask pi to set up a fetcher and it will use them.
 
 > [!WARNING]
 > **Only include URLs you control.** URL includes are meant for sharing your own glossary between installations, such as a gist or a repository you maintain. Whatever a remote glossary says goes into the agent's context every time one of its terms comes up, and its `pattern` regexes run on every keystroke and prompt. A source someone else can edit can steer the agent, inject a definition into every prompt (a pattern like `(?:)` matches everything), or freeze pi with a regex that backtracks forever. Remote entries are labelled as not written by you and never run shell commands, but that only limits the damage. Prefer `https` URLs: over `http` anyone on the network path can rewrite the file.

@@ -1,6 +1,6 @@
 {
   "name": "pi-glossary",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Pi extension that lazy-loads glossary definitions into the agent context when prompts mention matching terms",
   "author": "Ronie",
   "license": "MIT",
@@ -28,11 +28,15 @@
     "index.ts",
     "glossary.json",
     "scripts/",
+    "skills/",
     "README.md"
   ],
   "pi": {
     "extensions": [
       "./index.ts"
+    ],
+    "skills": [
+      "./skills"
     ]
   },
   "peerDependencies": {

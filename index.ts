@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { execFile, execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -616,7 +616,7 @@ async function fetchGlossaryUrl(url: string, withToken: boolean): Promise<string
 	if ((response.headers.get("content-type") ?? "").includes("text/html")) {
 		const landed = response.redirected ? new URL(response.url).host : "";
 		throw new Error(
-			`got an HTML page instead of a glossary${landed ? ` (redirected to ${landed})` : ""}; the URL probably needs a login, which glossary includes cannot do`,
+			`got an HTML page instead of a glossary${landed ? ` (redirected to ${landed})` : ""}; the URL probably needs a login: set up a fetcher for it in ~/.pi/agent/glossary-fetchers.json`,
 		);
 	}
 	// Read at most MAX_REMOTE_BYTES so a huge response cannot exhaust memory.
@@ -637,6 +637,165 @@ async function fetchGlossaryUrl(url: string, withToken: boolean): Promise<string
 	return Buffer.concat(chunks).toString("utf8");
 }
 
+/**
+ * A program the user picked to fetch the URL includes that `match` accepts, in place of a
+ * plain HTTP GET: `gh` for private gists, or a script that signs in to a host behind SSO.
+ */
+type GlossaryFetcher = {
+	name: string;
+	/** Matched against the whole include URL, exactly as written. */
+	match: RegExp;
+	/** Program and arguments, run directly (no shell). `{url}`, `{1}`, `{name}` are filled from the match. */
+	command: string[];
+	/** Where the include must be written for this fetcher to run. */
+	scopes: GlossaryOrigin[];
+	timeoutMs: number;
+	format?: "json" | "jsonl";
+};
+
+const FETCHER_KEYS = new Set(["name", "match", "command", "scopes", "timeoutMs", "format"]);
+const FETCHER_SCOPES: GlossaryOrigin[] = ["global", "project", "remote"];
+const MAX_FETCHER_TIMEOUT_MS = 60_000;
+
+function fetchersFile(): string {
+	return path.join(os.homedir(), ".pi", "agent", "glossary-fetchers.json");
+}
+
+/**
+ * Read the fetchers from the user's home directory, the only place they can come from:
+ * a project or a remote glossary cannot add one or change which program runs.
+ */
+function loadFetchers(): GlossaryFetcher[] {
+	const file = fetchersFile();
+	if (!fs.existsSync(file)) return [];
+	const label = file.replace(os.homedir(), "~");
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+	} catch (error) {
+		throw new Error(`Invalid fetcher config ${label}: not valid JSON (${error instanceof Error ? error.message : String(error)})`);
+	}
+	if (!Array.isArray(parsed)) {
+		throw new Error(`Invalid fetcher config ${label}: root value must be an array`);
+	}
+	return parsed.map((item, index) => parseFetcher(item, `Invalid fetcher config ${label}: fetcher #${index + 1}`, index));
+}
+
+function parseFetcher(item: unknown, where: string, index: number): GlossaryFetcher {
+	if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error(`${where} must be an object`);
+	const f = item as Record<string, unknown>;
+	const unknownKeys = Object.keys(f).filter((key) => !FETCHER_KEYS.has(key));
+	if (unknownKeys.length > 0) throw new Error(`${where} has unknown field(s): ${unknownKeys.join(", ")}`);
+
+	if (f.name !== undefined && (typeof f.name !== "string" || !f.name.trim())) {
+		throw new Error(`${where}: "name" must be a non-empty string`);
+	}
+	const name = typeof f.name === "string" ? f.name.trim() : `#${index + 1}`;
+
+	if (typeof f.match !== "string" || !f.match.trim()) throw new Error(`${where}: "match" must be a non-empty regex string`);
+	let match: RegExp;
+	try {
+		// Wrapped so the whole URL must match, even when the regex forgets an anchor or has a top-level `|`.
+		match = new RegExp(`^(?:${f.match})$`, "u");
+	} catch (error) {
+		throw new Error(`${where}: "match" is not a valid regex (${error instanceof Error ? error.message : String(error)})`);
+	}
+
+	if (!Array.isArray(f.command) || f.command.length === 0 || !f.command.every((arg) => typeof arg === "string")) {
+		throw new Error(`${where}: "command" must be a non-empty array of strings, like ["gh", "gist", "view", "{id}"]`);
+	}
+	const command = f.command as string[];
+	const program = command[0]!;
+	if (!program || /[{}]/.test(program)) throw new Error(`${where}: the program in "command" must be a fixed name, not a placeholder`);
+	if (program.includes("/") && !path.isAbsolute(program) && !program.startsWith("~/")) {
+		throw new Error(`${where}: the program in "command" must be on PATH, an absolute path, or start with ~/`);
+	}
+
+	let scopes: GlossaryOrigin[] = ["global"];
+	if (f.scopes !== undefined) {
+		if (!Array.isArray(f.scopes) || f.scopes.length === 0 || !f.scopes.every((s) => FETCHER_SCOPES.includes(s))) {
+			throw new Error(`${where}: "scopes" must be a non-empty array of ${FETCHER_SCOPES.map((s) => `"${s}"`).join(", ")}`);
+		}
+		scopes = f.scopes as GlossaryOrigin[];
+	}
+
+	let timeoutMs = FETCH_TIMEOUT_MS;
+	if (f.timeoutMs !== undefined) {
+		if (typeof f.timeoutMs !== "number" || !Number.isInteger(f.timeoutMs) || f.timeoutMs < 1 || f.timeoutMs > MAX_FETCHER_TIMEOUT_MS) {
+			throw new Error(`${where}: "timeoutMs" must be a whole number from 1 to ${MAX_FETCHER_TIMEOUT_MS}`);
+		}
+		timeoutMs = f.timeoutMs;
+	}
+
+	if (f.format !== undefined && f.format !== "json" && f.format !== "jsonl") {
+		throw new Error(`${where}: "format" must be "json" or "jsonl"`);
+	}
+
+	return { name, match, command, scopes, timeoutMs, format: f.format as GlossaryFetcher["format"] };
+}
+
+/**
+ * Fill `{url}`, `{N}` and `{group}` from the match; any other braces stay as written. With no
+ * placeholder at all, the URL is appended. A value that would turn an argument into an option
+ * (a leading `-`) is refused, since the URL is still text from a glossary file.
+ */
+function fetcherArgv(fetcher: GlossaryFetcher, url: string, match: RegExpExecArray): string[] {
+	const valueOf = (key: string): string | undefined =>
+		key === "url" ? url : /^\d+$/.test(key) ? match[Number(key)] ?? "" : match.groups && key in match.groups ? match.groups[key] ?? "" : undefined;
+	let usedPlaceholder = false;
+	const argv = fetcher.command.map((arg) => {
+		const filled = arg.replace(/\{(\w+)\}/g, (whole, key: string) => {
+			const value = valueOf(key);
+			if (value === undefined) return whole;
+			usedPlaceholder = true;
+			return value;
+		});
+		if (filled.startsWith("-") && !arg.startsWith("-")) {
+			throw new Error(`fetcher "${fetcher.name}" refused an argument that starts with "-": ${filled}`);
+		}
+		return filled;
+	});
+	if (!usedPlaceholder) argv.push(url);
+	if (argv[0]!.startsWith("~/")) argv[0] = path.join(os.homedir(), argv[0]!.slice(2));
+	return argv;
+}
+
+/** Run a fetcher without a shell, from the home directory, with the same time and size limits as HTTP includes. */
+function runFetcher(fetcher: GlossaryFetcher, argv: string[]): Promise<string> {
+	return new Promise((resolve, reject) => {
+		execFile(
+			argv[0]!,
+			argv.slice(1),
+			{ cwd: os.homedir(), timeout: fetcher.timeoutMs, maxBuffer: MAX_REMOTE_BYTES, encoding: "utf8", windowsHide: true },
+			(error, stdout, stderr) => {
+				if (!error) return resolve(stdout);
+				const e = error as Error & { code?: unknown; killed?: boolean };
+				const why =
+					e.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" ? `output is larger than ${MAX_REMOTE_BYTES} bytes`
+					: e.killed ? `timed out after ${fetcher.timeoutMs / 1000}s`
+					: String(stderr ?? "").trim().split("\n")[0] || e.message.split("\n")[0];
+				reject(new Error(`fetcher "${fetcher.name}" failed: ${why}`));
+			},
+		);
+	});
+}
+
+/**
+ * Fetch a URL include: through the first fetcher whose `match` accepts the URL as written,
+ * or with a plain GET when none does.
+ */
+async function fetchInclude(written: string, url: string, ctx: LoadCtx): Promise<{ text: string; format?: "json" | "jsonl" }> {
+	for (const fetcher of ctx.fetchers) {
+		const match = fetcher.match.exec(written);
+		if (!match) continue;
+		if (!fetcher.scopes.includes(ctx.origin)) {
+			throw new Error(`fetcher "${fetcher.name}" matches this URL but is not enabled for includes in a ${ctx.origin} glossary (see its "scopes")`);
+		}
+		return { text: await runFetcher(fetcher, fetcherArgv(fetcher, written, match)), format: fetcher.format };
+	}
+	return { text: await fetchGlossaryUrl(url, ctx.origin === "global") };
+}
+
 type LoadedFile = { found: boolean; entries: GlossaryEntry[]; path: string; label?: string };
 
 /**
@@ -653,6 +812,8 @@ type LoadCtx = {
 	trusted: boolean;
 	/** Origin of the file being read; becomes "remote" below a URL include and never changes back. */
 	origin: GlossaryOrigin;
+	/** From the user's home directory only; nothing in a glossary file can change them. */
+	fetchers: GlossaryFetcher[];
 };
 
 /**
@@ -679,9 +840,9 @@ async function resolveGlossaryItems(items: unknown[], defaultSource: string, ctx
 
 			try {
 				if (isUrl(source)) {
-					const raw = await fetchGlossaryUrl(source, ctx.origin === "global");
-					const pseudoFile = source.endsWith(".jsonl") ? "remote.jsonl" : "remote.json";
-					const nested = parseGlossaryFile(raw, pseudoFile);
+					const fetched = await fetchInclude(rawSource, source, ctx);
+					const format = fetched.format ?? (source.endsWith(".jsonl") ? "jsonl" : "json");
+					const nested = parseGlossaryFile(fetched.text, `remote.${format}`);
 					// Remote glossaries never run shell templates.
 					result.push(...(await resolveGlossaryItems(nested, source, { ...ctx, trusted: false, origin: "remote" })));
 				} else {
@@ -745,7 +906,7 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 			const warnings: string[] = [];
 			const globalFile = resolveGlossaryFile(path.join(os.homedir(), ".pi", "agent", "glossary"));
 			const projectFile = resolveGlossaryFile(path.join(cwd, ".pi", "glossary"));
-			const ctx = { cwd, visited, warnings, trusted: true };
+			const ctx = { cwd, visited, warnings, trusted: true, fetchers: loadFetchers() };
 			const globalResult = await loadGlossaryFile(globalFile, { ...ctx, origin: "global" });
 			const projectResult = await loadGlossaryFile(projectFile, { ...ctx, origin: "project" });
 
