@@ -268,3 +268,154 @@ describe("remote fetches", () => {
 		expect(await g.prompt("big ok")).toContain("### `ok`");
 	});
 });
+
+describe("fetchers", () => {
+	/** A fetcher program that records its arguments and prints `out` (or fails with `err`). */
+	function writeFetcher(name: string, opts: { out?: unknown[]; err?: string; sleep?: number } = {}): { bin: string; args: () => string[][] } {
+		const dir = path.join(home, "bin");
+		fs.mkdirSync(dir, { recursive: true });
+		const bin = path.join(dir, name);
+		const log = path.join(dir, `${name}.log`);
+		const outFile = path.join(dir, `${name}.out`);
+		fs.writeFileSync(outFile, JSON.stringify(opts.out ?? []));
+		fs.writeFileSync(
+			bin,
+			[
+				"#!/bin/sh",
+				`for a in "$@"; do printf '%s\\t' "$a" >> '${log}'; done; echo >> '${log}'`,
+				opts.sleep ? `sleep ${opts.sleep}` : "",
+				opts.err ? `echo '${opts.err}' >&2; exit 3` : `cat '${outFile}'`,
+			].join("\n"),
+			{ mode: 0o755 },
+		);
+		const args = () =>
+			fs.existsSync(log) ? fs.readFileSync(log, "utf8").split("\n").filter(Boolean).map((l) => l.split("\t").slice(0, -1)) : [];
+		return { bin, args };
+	}
+
+	function writeFetchers(items: unknown, dir = path.join(home, ".pi", "agent")) {
+		fs.writeFileSync(path.join(dir, "glossary-fetchers.json"), JSON.stringify(items));
+	}
+
+	test("fetch matching includes with the configured program, without a shell", async () => {
+		const f = writeFetcher("gist", { out: [{ term: "secret", definition: "s {{echo RAN}}" }] });
+		writeFetchers([{ name: "gist", match: "^https://gist\\.github\\.com/me/(?<id>[0-9a-f]+)$", command: [f.bin, "view", "{id}", "--raw"] }]);
+		writeGlobal([{ include: "https://gist.github.com/me/abc123" }]);
+		const g = await start();
+
+		expect(f.args()).toEqual([["view", "abc123", "--raw"]]);
+		expect(fetched).toEqual([]);
+		const out = await g.prompt("secret");
+		expect(out).toContain("### `secret`\n_Not written by the user");
+		expect(out).toContain("s [shell template disabled: remote glossary source]");
+	});
+
+	test("pass the URL as one argument, appended when there is no placeholder", async () => {
+		const f = writeFetcher("any", { out: [{ term: "t", definition: "d" }] });
+		writeFetchers([{ match: "https://example\\.com/.*", command: [f.bin] }]);
+		const url = "https://example.com/a;touch${IFS}PWNED $(touch PWNED2)";
+		writeGlobal([{ include: url }]);
+		await start();
+
+		expect(f.args()).toEqual([[url]]);
+		expect(fs.readdirSync(home)).not.toContain("PWNED");
+		expect(fs.readdirSync(home)).not.toContain("PWNED2");
+	});
+
+	test("must match the whole URL", async () => {
+		const f = writeFetcher("any");
+		writeFetchers([
+			{ match: "https://example\\.com/[a-z]+\\.json", command: [f.bin] },
+			{ match: "https://a\\.example|https://b\\.example/x\\.json", command: [f.bin] },
+		]);
+		writeGlobal([
+			{ include: "https://evil.example/?u=https://example.com/g.json" },
+			{ include: "https://example.com/g.json.evil.example/x.json" },
+			{ include: "https://a.example.evil.example/x.json" },
+		]);
+		await start();
+
+		expect(f.args()).toEqual([]);
+		expect(fetched.map((x) => x.url)).toHaveLength(3);
+	});
+
+	test("run only for includes in the scopes they allow", async () => {
+		const f = writeFetcher("any", { out: [{ term: "t", definition: "d" }] });
+		const remote = "https://example.com/r.json";
+		urls[remote] = JSON.stringify([{ include: "https://private.example/from-remote.json" }]);
+		writeFetchers([{ name: "private", match: "https://private\\.example/.*", command: [f.bin] }]);
+		writeGlobal([{ include: remote }]);
+		writeProject([{ include: "https://private.example/from-project.json" }]);
+		const g = await start();
+
+		expect(f.args()).toEqual([]);
+		expect(fetched.map((x) => x.url)).toEqual([remote]);
+		expect(g.notes.some((n) => n.msg.includes('fetcher "private" matches this URL but is not enabled for includes in a project glossary'))).toBe(true);
+		expect(g.notes.some((n) => n.msg.includes("not enabled for includes in a remote glossary"))).toBe(true);
+	});
+
+	test("scopes can allow project includes", async () => {
+		const f = writeFetcher("any", { out: [{ term: "t", definition: "d" }] });
+		writeFetchers([{ match: "https://private\\.example/.*", command: [f.bin], scopes: ["global", "project"] }]);
+		writeProject([{ include: "https://private.example/p.json" }]);
+		await start();
+
+		expect(f.args()).toEqual([["https://private.example/p.json"]]);
+	});
+
+	test("a project cannot configure fetchers", async () => {
+		const f = writeFetcher("any", { out: [{ term: "t", definition: "d" }] });
+		writeFetchers([{ match: ".*", command: [f.bin], scopes: ["project"] }], path.join(cwd, ".pi"));
+		writeProject([{ include: "https://example.com/p.json" }]);
+		await start();
+
+		expect(f.args()).toEqual([]);
+		expect(fetched.map((x) => x.url)).toEqual(["https://example.com/p.json"]);
+	});
+
+	test("refuse a placeholder value that would become an option", async () => {
+		const f = writeFetcher("any");
+		writeFetchers([{ name: "loose", match: "https://example\\.com/(.*)", command: [f.bin, "{1}"] }]);
+		writeGlobal([{ include: "https://example.com/--output=/etc/passwd" }]);
+		const g = await start();
+
+		expect(f.args()).toEqual([]);
+		expect(g.notes.some((n) => n.msg.includes('fetcher "loose" refused an argument that starts with "-"'))).toBe(true);
+	});
+
+	test("report a failing or slow program, and the format can be set", async () => {
+		const bad = writeFetcher("bad", { err: "not signed in" });
+		const slow = writeFetcher("slow", { sleep: 2 });
+		const lines = writeFetcher("lines");
+		fs.writeFileSync(path.join(home, "bin", "lines.out"), '{"term":"one","definition":"1"}\n{"term":"two","definition":"2"}\n');
+		writeFetchers([
+			{ name: "bad", match: "https://bad\\.example/.*", command: [bad.bin] },
+			{ name: "slow", match: "https://slow\\.example/.*", command: [slow.bin], timeoutMs: 200 },
+			{ name: "lines", match: "https://lines\\.example/.*", command: [lines.bin], format: "jsonl" },
+		]);
+		writeGlobal([
+			{ include: "https://bad.example/g.json" },
+			{ include: "https://slow.example/g.json" },
+			{ include: "https://lines.example/g" },
+		]);
+		const g = await start();
+
+		expect(g.notes.some((n) => n.msg.includes('fetcher "bad" failed: not signed in'))).toBe(true);
+		expect(g.notes.some((n) => n.msg.includes('fetcher "slow" failed: timed out'))).toBe(true);
+		expect(await g.prompt("one two")).toContain("### `two`");
+	});
+
+	test("a bad fetcher config is a load error", async () => {
+		writeFetchers([{ match: "https://example\\.com/.*", command: "gh gist view" }]);
+		writeGlobal([{ term: "t", definition: "d" }]);
+		const g = await start();
+		expect(g.notes.some((n) => n.level === "error" && n.msg.includes('"command" must be a non-empty array of strings'))).toBe(true);
+	});
+
+	test("an HTML login page points to fetchers", async () => {
+		writeGlobal([{ include: "https://example.com/sso.json" }]);
+		globalThis.fetch = (async () => new Response("<html>", { headers: { "content-type": "text/html" } })) as typeof fetch;
+		const g = await start();
+		expect(g.notes.some((n) => n.msg.includes("glossary-fetchers.json"))).toBe(true);
+	});
+});
