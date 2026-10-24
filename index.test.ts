@@ -152,12 +152,21 @@ describe("compaction", () => {
 		const out = await g.prompt("alpha and beta");
 		expect(out).toContain("### `alpha`");
 		expect(out).not.toContain("### `beta`");
+
+		await g.compact(1);
+		const again = await g.prompt("alpha and beta");
+		expect(again).toContain("### `beta`");
+		expect(again).not.toContain("### `alpha`");
 	});
 
-	test("a looked-up definition it drops is added again at the next mention", async () => {
+	test("a looked-up definition counts as dropped or kept like an added one", async () => {
 		writeGlobal([{ term: "gamma", definition: "g" }]);
 		const g = await start();
+		await g.prompt("look it up");
 		await g.lookup("gamma");
+		expect(await g.prompt("gamma")).toBe("");
+
+		await g.compact(2);
 		expect(await g.prompt("gamma")).toBe("");
 
 		await g.compact();
