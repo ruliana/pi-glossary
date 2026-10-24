@@ -2,7 +2,7 @@ import { execFile, execSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@mariozechner/pi-coding-agent";
 import { CustomEditor } from "@mariozechner/pi-coding-agent";
 import { CURSOR_MARKER, matchesKey, Key, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
 import type { Component, EditorTheme, TUI } from "@mariozechner/pi-tui";
@@ -188,6 +188,28 @@ function matchesText(matcher: RegExp, text: string): boolean {
 function formatEntry(entry: CompiledEntry): string {
 	const note = entry.origin === "remote" ? `${UNTRUSTED_NOTE}\n` : "";
 	return `### \`${entry.term}\`\n${note}${entry.definition.trim()}`.trim();
+}
+
+/**
+ * Terms whose glossary message or lookup result is still in the model context after a compaction,
+ * and whether the preamble is too. A compaction summarizes away every entry before `firstKeptEntryId`.
+ */
+function glossaryKeptByCompaction(branch: SessionEntry[], firstKeptEntryId: string): { terms: Set<string>; preamble: boolean } {
+	const start = branch.findIndex((entry) => entry.id === firstKeptEntryId);
+	const terms = new Set<string>();
+	let preamble = false;
+	for (const entry of start === -1 ? [] : branch.slice(start)) {
+		let details: unknown;
+		if (entry.type === "custom_message" && entry.customType === "glossary") {
+			details = entry.details;
+			preamble ||= typeof entry.content === "string" && entry.content.includes(GLOSSARY_PREAMBLE);
+		} else if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "glossary_lookup") {
+			details = entry.message.details;
+		}
+		const kept = (details as { terms?: unknown } | undefined)?.terms;
+		if (Array.isArray(kept)) for (const term of kept) terms.add(String(term));
+	}
+	return { terms, preamble };
 }
 
 function extractRefs(definition: string): string[] {
@@ -1051,6 +1073,7 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 
 			return {
 				content: [{ type: "text" as const, text: formatEntry(expandedEntry) }],
+				details: { terms: [entry.term] },
 			};
 		},
 	});
@@ -1128,6 +1151,14 @@ export default function lazyGlossaryExtension(pi: ExtensionAPI) {
 				},
 			});
 		});
+	});
+
+	// A compaction can drop a definition from the context; unmark its term so the next mention adds it again.
+	pi.on("session_compact", async (event, ctx) => {
+		const kept = glossaryKeptByCompaction(ctx.sessionManager.getBranch(), event.compactionEntry.firstKeptEntryId);
+		loadedTermsForSession = new Set([...loadedTermsForSession].filter((term) => kept.terms.has(term)));
+		hasInjectedGlossaryPreamble = kept.preamble;
+		updateGlossaryWidget(ctx);
 	});
 
 	pi.on("before_agent_start", async (event, ctx) => {

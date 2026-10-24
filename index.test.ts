@@ -70,10 +70,14 @@ async function start() {
 	const tools: Record<string, any> = {};
 	const commands: Record<string, any> = {};
 	const notes: Array<{ msg: string; level: string }> = [];
+	// Stands in for the session: Pi appends each prompt, glossary message and tool result to the branch.
+	const branch: any[] = [];
+	const append = (entry: any) => branch.push({ id: `e${branch.length + 1}`, ...entry });
 	const ctx = {
 		cwd,
 		hasUI: false,
 		ui: { notify: (msg: string, level: string) => notes.push({ msg, level }), setWidget() {}, setStatus() {} },
+		sessionManager: { getBranch: () => [...branch] },
 	};
 	extension({
 		registerCommand: (name: string, cmd: any) => (commands[name] = cmd),
@@ -84,8 +88,20 @@ async function start() {
 	return {
 		notes,
 		prompt: async (text: string): Promise<string> => {
+			append({ type: "message", message: { role: "user", content: text } });
 			const res = await handlers.before_agent_start!({ prompt: text }, ctx);
+			if (res?.message) append({ type: "custom_message", ...res.message });
 			return res?.message?.content ?? "";
+		},
+		/** Compact the session, keeping the last `keptPrompts` prompts and what followed them. */
+		compact: async (keptPrompts = 0) => {
+			const prompts = branch.filter((e) => e.type === "message" && e.message.role === "user");
+			const id = `e${branch.length + 1}`;
+			const firstKeptEntryId = keptPrompts > 0 ? prompts[prompts.length - keptPrompts].id : id;
+			const compactionEntry = { type: "compaction", id, summary: "s", firstKeptEntryId, tokensBefore: 0 };
+			branch.push(compactionEntry);
+			const event = { type: "session_compact", compactionEntry, fromExtension: false, reason: "threshold", willRetry: false };
+			await handlers.session_compact?.(event, ctx);
 		},
 		/** Open the /glossary browser and return its rendered lines. */
 		browse: async (): Promise<string[]> => {
@@ -102,10 +118,61 @@ async function start() {
 		},
 		lookup: async (term: string): Promise<string> => {
 			const res = await tools.glossary_lookup.execute("id", { term }, undefined, undefined, ctx);
+			append({ type: "message", message: { role: "toolResult", toolName: "glossary_lookup", ...res } });
 			return res.content[0].text;
 		},
 	};
 }
+
+describe("compaction", () => {
+	test("a definition it drops is added again at the next mention, once", async () => {
+		writeGlobal([{ term: "xplore", definition: "Explore first." }]);
+		const g = await start();
+
+		expect(await g.prompt("xplore the repo")).toContain("### `xplore`");
+		expect(await g.prompt("xplore again")).toBe("");
+
+		await g.compact();
+		const out = await g.prompt("xplore the tests");
+		expect(out).toContain("### `xplore`\nExplore first.");
+		expect(out).toContain("Treat the following definitions as authoritative");
+		expect(await g.prompt("xplore once more")).toBe("");
+	});
+
+	test("a definition it keeps is not added again", async () => {
+		writeGlobal([
+			{ term: "alpha", definition: "a" },
+			{ term: "beta", definition: "b" },
+		]);
+		const g = await start();
+		await g.prompt("alpha");
+		await g.prompt("beta");
+
+		await g.compact(1);
+		const out = await g.prompt("alpha and beta");
+		expect(out).toContain("### `alpha`");
+		expect(out).not.toContain("### `beta`");
+
+		await g.compact(1);
+		const again = await g.prompt("alpha and beta");
+		expect(again).toContain("### `beta`");
+		expect(again).not.toContain("### `alpha`");
+	});
+
+	test("a looked-up definition counts as dropped or kept like an added one", async () => {
+		writeGlobal([{ term: "gamma", definition: "g" }]);
+		const g = await start();
+		await g.prompt("look it up");
+		await g.lookup("gamma");
+		expect(await g.prompt("gamma")).toBe("");
+
+		await g.compact(2);
+		expect(await g.prompt("gamma")).toBe("");
+
+		await g.compact();
+		expect(await g.prompt("gamma")).toContain("### `gamma`");
+	});
+});
 
 describe("remote glossaries", () => {
 	test("never run shell templates, even when an include asks to", async () => {
